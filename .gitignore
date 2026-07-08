@@ -1,0 +1,20 @@
+# runtime files (sync file, launcher, GUI config)
+runtime/
+
+# databases and logs
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.log
+
+# python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+.fuse_hidden*
+
+# local scratch
+data/
