@@ -205,26 +205,38 @@ def get_game(db_path: str | Path, game_id: int) -> GameDetail | None:
 
 def format_report(sfen: str, candidates, precedents, total_games: int) -> str:
     """Plain-text report in the spirit of the KiriCompass precedent pane."""
+    from .board import Position, usi_to_move16
+    from .ki2 import move16_to_ki2
+
+    position = Position()
+    position.set_sfen(normalize_sfen_main(sfen))
+
+    def ki2(usi: str) -> str:
+        code = usi_to_move16(usi) if usi else None
+        return move16_to_ki2(position, code) if code is not None else "(終局)"
+
     lines = [f"sfen {normalize_sfen_main(sfen)}",
              f"前例: {total_games}局", ""]
     if candidates:
-        lines.append("候補手          出現    先手勝  後手勝  引分   勝率")
-        for c in candidates:
+        lines.append("No. 指し手        USI     出現   先手勝  後手勝  引分   勝率")
+        for rank, c in enumerate(candidates, start=1):
             decided = c.black_wins + c.white_wins
             rate = (f"{c.black_wins / decided * 100:5.1f}%" if decided else "   -  ")
-            lines.append(f"{c.usi:<12} {c.game_count:>6} {c.black_wins:>7} "
+            lines.append(f"{rank:>3} {ki2(c.usi) if c.usi != '(end)' else '(終局)':<12}"
+                         f" {c.usi:<7} {c.game_count:>5} {c.black_wins:>7} "
                          f"{c.white_wins:>7} {c.draws:>5} {rate:>7}")
     else:
         lines.append("(前例なし)")
     lines.append("")
     if precedents:
-        lines.append("対局日時          先手 / 後手                        "
-                     "次手      結果  終局理由  URL")
-        for p in precedents:
+        lines.append("No. 対局日      先手 / 後手                         "
+                     "次の一手    結果  終局理由  URL")
+        for rank, p in enumerate(precedents, start=1):
             result = {1: "先手勝", 2: "後手勝", 0: "引分"}.get(p.result, "不明")
             reason = REASON_JA.get(p.end_reason, p.end_reason)
             players = f"{p.black_name} / {p.white_name}"
-            lines.append(f"{p.started_at:<17} {players:<35} "
-                         f"{p.next_move_usi or '(終局)':<9} {result:<5} "
+            date = p.started_at[:10].replace("-", "/")
+            lines.append(f"{rank:>3} {date:<11} {players:<35} "
+                         f"{ki2(p.next_move_usi):<10} {result:<5} "
                          f"{reason:<5} {p.url or ''}")
     return "\n".join(lines) + "\n"

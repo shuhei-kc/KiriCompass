@@ -22,12 +22,43 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from kifudb.board import (Position, format_pv_kanji, move16_to_kanji,  # noqa: E402
-                          normalize_sfen_main, usi_to_move16)
+from kifudb.board import Position, normalize_sfen_main, usi_to_move16  # noqa: E402
+from kifudb.ki2 import format_pv_ki2, move16_to_ki2  # noqa: E402
 from kifudb.query import PrecedentReader, REASON_JA, format_report  # noqa: E402
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR  # noqa: E402
 
 SYNC_POLL_MS = 300
+
+# 等幅かつ日本語対応のフォントをOSごとに優先順で探す。
+MONO_FONT_CANDIDATES = [
+    "BIZ UDゴシック", "BIZ UDGothic",          # Windows 10 1809+
+    "ＭＳ ゴシック", "MS Gothic",
+    "Osaka-等幅", "Osaka-Mono", "Osaka",       # macOS
+    "Noto Sans Mono CJK JP", "IPAGothic",      # Linux
+    "Menlo", "Consolas", "Courier New",
+]
+
+
+def setup_dpi_awareness() -> None:
+    """Windowsで文字がぼやけないようにDPI対応を宣言する (Tk生成前に呼ぶ)。"""
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except (AttributeError, OSError):
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except (AttributeError, OSError):
+                pass
+
+
+def pick_mono_font(root: tk.Tk) -> str:
+    import tkinter.font as tkfont
+    available = set(tkfont.families(root))
+    for name in MONO_FONT_CANDIDATES:
+        if name in available:
+            return name
+    return "TkFixedFont"
 
 CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
 RESULT_JA = {1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
@@ -46,11 +77,24 @@ class PrecedentViewer:
         self._sync_file = DEFAULT_SYNC_FILE  # runtime/gui_config.json で上書き可
         self._reader: PrecedentReader | None = None
 
+        self._setup_fonts()
         self._build_widgets()
         self._load_config()
         if len(sys.argv) > 1:
             self.db_var.set(sys.argv[1])
         self._poll_sync_file()
+
+    def _setup_fonts(self) -> None:
+        import tkinter.font as tkfont
+        family = pick_mono_font(self.root)
+        size = 13 if sys.platform == "darwin" else 11
+        self.mono_font = tkfont.Font(family=family, size=size)
+        heading_font = tkfont.nametofont("TkDefaultFont").copy()
+        heading_font.configure(weight="bold")
+        style = ttk.Style(self.root)
+        row_height = self.mono_font.metrics("linespace") + 8
+        style.configure("Treeview", font=self.mono_font, rowheight=row_height)
+        style.configure("Treeview.Heading", font=heading_font)
 
     # -- layout --------------------------------------------------------
 
@@ -66,7 +110,8 @@ class PrecedentViewer:
 
         ttk.Label(top, text="SFEN:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
         self.sfen_var = tk.StringVar()
-        sfen_entry = ttk.Entry(top, textvariable=self.sfen_var)
+        sfen_entry = ttk.Entry(top, textvariable=self.sfen_var,
+                               font=self.mono_font)
         sfen_entry.grid(row=1, column=1, sticky=tk.EW, padx=4, pady=(6, 0))
         sfen_entry.bind("<Return>", lambda _e: self.search())
         self.search_button = ttk.Button(top, text="検索", command=self.search)
@@ -83,11 +128,12 @@ class PrecedentViewer:
         panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         cand_frame = ttk.LabelFrame(panes, text="候補手")
-        cand_cols = ("move", "usi", "count", "black", "white", "draw", "rate")
+        cand_cols = ("no", "move", "usi", "count", "black", "white", "draw", "rate")
         self.cand_tv = ttk.Treeview(cand_frame, columns=cand_cols,
                                     show="headings", height=6)
         for col, label, width, anchor in (
-                ("move", "指し手", 130, tk.W), ("usi", "USI", 70, tk.W),
+                ("no", "No.", 44, tk.E),
+                ("move", "指し手", 140, tk.W), ("usi", "USI", 70, tk.W),
                 ("count", "出現", 70, tk.E), ("black", "先手勝", 70, tk.E),
                 ("white", "後手勝", 70, tk.E), ("draw", "引分", 60, tk.E),
                 ("rate", "先手勝率", 80, tk.E)):
@@ -97,11 +143,13 @@ class PrecedentViewer:
         panes.add(cand_frame, weight=1)
 
         prec_frame = ttk.LabelFrame(panes, text="前例")
-        prec_cols = ("date", "black", "white", "next", "result", "reason", "plies", "source")
+        prec_cols = ("no", "date", "black", "white", "next", "result", "reason",
+                     "plies", "source")
         self.prec_tv = ttk.Treeview(prec_frame, columns=prec_cols, show="headings")
         for col, label, width, anchor in (
-                ("date", "対局日時", 130, tk.W), ("black", "先手", 170, tk.W),
-                ("white", "後手", 170, tk.W), ("next", "次の一手", 110, tk.W),
+                ("no", "No.", 44, tk.E),
+                ("date", "対局日", 110, tk.W), ("black", "先手", 170, tk.W),
+                ("white", "後手", 170, tk.W), ("next", "次の一手", 120, tk.W),
                 ("result", "結果", 60, tk.W), ("reason", "終局理由", 80, tk.W),
                 ("plies", "手数", 50, tk.E), ("source", "出典", 80, tk.W)):
             self.prec_tv.heading(col, text=label)
@@ -118,7 +166,7 @@ class PrecedentViewer:
 
         detail_frame = ttk.LabelFrame(panes, text="詳細 (評価値・読み筋・URL)")
         self.detail_text = tk.Text(detail_frame, height=5, wrap=tk.WORD,
-                                   state=tk.DISABLED)
+                                   state=tk.DISABLED, font=self.mono_font)
         self.detail_text.pack(fill=tk.BOTH, expand=True)
         panes.add(detail_frame, weight=1)
 
@@ -190,23 +238,24 @@ class PrecedentViewer:
         self.precedents = precedents
 
         self.cand_tv.delete(*self.cand_tv.get_children())
-        for c in candidates:
+        for rank, c in enumerate(candidates, start=1):
             code = usi_to_move16(c.usi)
-            label = (move16_to_kanji(code, position) if code is not None
+            label = (move16_to_ki2(position, code) if code is not None
                      else "(終局)" if c.usi == "(end)" else c.usi)
             decided = c.black_wins + c.white_wins
             rate = f"{c.black_wins / decided * 100:.1f}%" if decided else "-"
             self.cand_tv.insert("", tk.END, values=(
-                label, c.usi, c.game_count, c.black_wins, c.white_wins,
+                rank, label, c.usi, c.game_count, c.black_wins, c.white_wins,
                 c.draws, rate))
 
         self.prec_tv.delete(*self.prec_tv.get_children())
         for index, p in enumerate(precedents):
             code = usi_to_move16(p.next_move_usi) if p.next_move_usi else None
-            next_label = (move16_to_kanji(code, position) if code is not None
+            next_label = (move16_to_ki2(position, code) if code is not None
                           else "(終局)")
             self.prec_tv.insert("", tk.END, iid=str(index), values=(
-                p.started_at, p.black_name, p.white_name, next_label,
+                index + 1, p.started_at[:10].replace("-", "/"),
+                p.black_name, p.white_name, next_label,
                 RESULT_JA.get(p.result, "?"), REASON_JA.get(p.end_reason, p.end_reason),
                 p.ply_count, p.source))
 
@@ -219,7 +268,8 @@ class PrecedentViewer:
         p = self._selected_precedent()
         if p is None:
             return
-        lines = [f"{p.black_name} vs {p.white_name}  {p.started_at}  "
+        lines = [f"{p.black_name} vs {p.white_name}  "
+                 f"{p.started_at[:10].replace('-', '/')}  "
                  f"{RESULT_JA.get(p.result, '?')} ({REASON_JA.get(p.end_reason, p.end_reason)}) "
                  f"{p.ply_count}手"]
         detail = self._get_reader(self.db_var.get().strip()).get_game(p.game_id)
@@ -231,7 +281,7 @@ class PrecedentViewer:
             if ply < len(detail.pvs_usi) and detail.pvs_usi[ply] and self.query_position:
                 codes = [usi_to_move16(u) for u in detail.pvs_usi[ply]]
                 codes = [c for c in codes if c is not None]
-                lines.append("読み筋: " + format_pv_kanji(self.query_position, codes))
+                lines.append("読み筋: " + format_pv_ki2(self.query_position, codes))
         else:
             lines.append("評価値・読み筋の記録なし")
         if p.url:
@@ -331,6 +381,7 @@ class PrecedentViewer:
 
 
 def main() -> None:
+    setup_dpi_awareness()
     root = tk.Tk()
     PrecedentViewer(root)
     root.mainloop()
