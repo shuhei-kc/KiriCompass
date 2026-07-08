@@ -15,6 +15,7 @@ import json
 import sys
 import threading
 import time
+import urllib.parse
 import webbrowser
 from pathlib import Path
 
@@ -65,12 +66,33 @@ CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
 RESULT_JA = {1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
 WINNER_JA = {1: "先", 2: "後"}  # それ以外 (引分・結果なし) は "-"
 
+# Xポスト文言のテンプレート。runtime/post_template.txt を編集すれば
+# 再起動なしで反映される (初回使用時にこの内容で自動生成)。
+# 使える変数: {black} {white} {date} {result} {reason} {ply_count}
+#             {next_move} {source} {event} {url}
+POST_TEMPLATE_FILE = RUNTIME_DIR / "post_template.txt"
+DEFAULT_POST_TEMPLATE = """{black} vs {white}
+{date} {result}({reason}) {ply_count}手
+{url}"""
+
+
+def load_post_template() -> str:
+    try:
+        return POST_TEMPLATE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        try:
+            POST_TEMPLATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            POST_TEMPLATE_FILE.write_text(DEFAULT_POST_TEMPLATE, encoding="utf-8")
+        except OSError:
+            pass
+        return DEFAULT_POST_TEMPLATE
+
 
 class PrecedentViewer:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("前例ビューア (kifudb)")
-        root.geometry("1080x720")
+        root.geometry("900x810")
 
         self.precedents = []
         self.query_position: Position | None = None
@@ -173,6 +195,16 @@ class PrecedentViewer:
         panes.add(prec_frame, weight=3)
 
         detail_frame = ttk.LabelFrame(panes, text="詳細 (評価値・読み筋・URL)")
+        detail_buttons = ttk.Frame(detail_frame)
+        detail_buttons.pack(side=tk.RIGHT, fill=tk.Y, padx=4, pady=4)
+        self.copy_url_button = ttk.Button(detail_buttons, text="URLコピー",
+                                          command=self._copy_url,
+                                          state=tk.DISABLED)
+        self.copy_url_button.pack(fill=tk.X)
+        self.post_x_button = ttk.Button(detail_buttons, text="Xでポスト",
+                                        command=self._post_to_x,
+                                        state=tk.DISABLED)
+        self.post_x_button.pack(fill=tk.X, pady=(4, 0))
         self.detail_text = tk.Text(detail_frame, height=5, wrap=tk.WORD,
                                    state=tk.DISABLED, font=self.mono_font)
         self.detail_text.pack(fill=tk.BOTH, expand=True)
@@ -319,6 +351,9 @@ class PrecedentViewer:
         p = self._selected_precedent()
         if p is None:
             return
+        button_state = tk.NORMAL if p.url else tk.DISABLED
+        self.copy_url_button.config(state=button_state)
+        self.post_x_button.config(state=button_state)
         lines = [f"{p.black_name} vs {p.white_name}  "
                  f"{p.started_at[:10].replace('-', '/')}  "
                  f"{RESULT_JA.get(p.result, '?')} ({REASON_JA.get(p.end_reason, p.end_reason)}) "
@@ -352,6 +387,40 @@ class PrecedentViewer:
             return self.precedents[int(selection[0])]
         except (ValueError, IndexError):
             return None
+
+    def _copy_url(self) -> None:
+        p = self._selected_precedent()
+        if p is None or not p.url:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(p.url)
+        self.status_var.set("URLをコピーしました。")
+
+    def _post_to_x(self) -> None:
+        p = self._selected_precedent()
+        if p is None or not p.url:
+            return
+        code = usi_to_move16(p.next_move_usi) if p.next_move_usi else None
+        context = {
+            "black": p.black_name, "white": p.white_name,
+            "date": p.started_at[:10].replace("-", "/"),
+            "result": RESULT_JA.get(p.result, "不明"),
+            "reason": REASON_JA.get(p.end_reason, p.end_reason),
+            "ply_count": p.ply_count,
+            "next_move": (move16_to_ki2(self.query_position, code)
+                          if code is not None and self.query_position else ""),
+            "source": p.source, "event": p.event, "url": p.url,
+        }
+        try:
+            text = load_post_template().format(**context)
+        except (KeyError, ValueError) as exc:
+            messagebox.showerror(
+                "テンプレートエラー",
+                f"post_template.txt を確認してください: {exc}\n"
+                f"使える変数: {', '.join('{' + k + '}' for k in context)}")
+            return
+        webbrowser.open("https://x.com/intent/post?text="
+                        + urllib.parse.quote(text))
 
     def _set_detail(self, text: str) -> None:
         self.detail_text.config(state=tk.NORMAL)
