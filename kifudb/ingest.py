@@ -17,8 +17,9 @@ log = logging.getLogger("kifudb.ingest")
 KIFU_SUFFIXES = {".csa", ".kif", ".kifu"}
 
 _SOURCE_PATTERNS = [
-    (re.compile(r"wdoor\+floodgate", re.I), "floodgate"),
-    (re.compile(r"^wdoor\+", re.I), "wdoor"),
+    # wdoorサーバー上の対局はテスト対局室 (wdoor+test-... 等) も含めて
+    # すべて floodgate 扱いにする (アーカイブとURL規則が同一のため)。
+    (re.compile(r"^wdoor\+", re.I), "floodgate"),
     (re.compile(r"^wcsc", re.I), "wcsc"),
     (re.compile(r"^dr\d", re.I), "denryusen"),
 ]
@@ -60,6 +61,13 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
     folder = Path(folder)
     conn = open_for_write(db_path)
     stats = IngestStats()
+
+    # 旧バージョンが 'wdoor' と分類したレコードを floodgate に正規化する。
+    migrated = conn.execute(
+        "UPDATE games SET source='floodgate' WHERE source='wdoor'").rowcount
+    if migrated:
+        conn.commit()
+        log.info("migrated %d games: source 'wdoor' -> 'floodgate'", migrated)
 
     files = sorted(p for p in folder.rglob("*")
                    if p.suffix.lower() in KIFU_SUFFIXES and p.is_file())

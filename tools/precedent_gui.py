@@ -149,7 +149,7 @@ class PrecedentViewer:
         self.prec_tv = ttk.Treeview(prec_frame, columns=prec_cols, show="headings")
         for col, label, width, anchor in (
                 ("no", "No.", 44, tk.E),
-                ("date", "対局日", 110, tk.W), ("black", "先手", 170, tk.W),
+                ("date", "対局日", 90, tk.W), ("black", "先手", 170, tk.W),
                 ("white", "後手", 170, tk.W), ("next", "次の一手", 96, tk.CENTER),
                 ("result", "勝者", 44, tk.CENTER), ("reason", "終局理由", 68, tk.CENTER),
                 ("plies", "手数", 50, tk.E), ("source", "出典", 80, tk.W)):
