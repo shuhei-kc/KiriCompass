@@ -24,11 +24,11 @@ from tkinter import filedialog, messagebox, ttk
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kifudb.board import Position, normalize_sfen_main, usi_to_move16  # noqa: E402
 from kifudb.ki2 import format_pv_ki2, move16_to_ki2  # noqa: E402
-from kifudb.query import PrecedentReader, REASON_JA, format_report  # noqa: E402
+from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
+                          PrecedentReader, REASON_JA, format_report)
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR  # noqa: E402
 
 SYNC_POLL_MS = 300
-PAGE_SIZE = 500
 
 # 等幅かつ日本語対応のフォントをOSごとに優先順で探す。
 MONO_FONT_CANDIDATES = [
@@ -130,13 +130,17 @@ class PrecedentViewer:
         panes = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        cand_frame = ttk.LabelFrame(panes, text="候補手")
+        # PanedWindowのペインは全幅に広がるため、コンテナを挟んで
+        # 枠線(LabelFrame)ごと列幅に合わせて左詰めにする
+        cand_holder = ttk.Frame(panes)
+        cand_frame = ttk.LabelFrame(cand_holder, text="候補手")
+        cand_frame.pack(side=tk.LEFT, fill=tk.Y)
         cand_cols = ("no", "move", "count", "black", "white", "draw", "rate")
         self.cand_tv = ttk.Treeview(cand_frame, columns=cand_cols,
                                     show="headings", height=6)
         for col, label, width, anchor in (
                 ("no", "No.", 44, tk.E),
-                ("move", "指し手", 110, tk.CENTER),
+                ("move", "指し手", 96, tk.W),
                 ("count", "出現", 70, tk.E), ("black", "先手勝", 70, tk.E),
                 ("white", "後手勝", 70, tk.E), ("draw", "引分", 60, tk.E),
                 ("rate", "先手勝率", 80, tk.E)):
@@ -144,7 +148,7 @@ class PrecedentViewer:
             self.cand_tv.column(col, width=width, anchor=anchor, stretch=False)
         # 列幅の合計にウィジェット自体を合わせ、左に詰める
         self.cand_tv.pack(side=tk.LEFT, fill=tk.Y)
-        panes.add(cand_frame, weight=1)
+        panes.add(cand_holder, weight=1)
 
         prec_frame = ttk.LabelFrame(panes, text="前例")
         prec_cols = ("no", "date", "black", "white", "next", "result", "reason",
@@ -153,7 +157,7 @@ class PrecedentViewer:
         for col, label, width, anchor in (
                 ("no", "No.", 44, tk.E),
                 ("date", "対局日", 90, tk.W), ("black", "先手", 170, tk.W),
-                ("white", "後手", 170, tk.W), ("next", "次の一手", 96, tk.CENTER),
+                ("white", "後手", 170, tk.W), ("next", "指し手", 96, tk.W),
                 ("result", "勝者", 44, tk.CENTER), ("reason", "終局理由", 68, tk.CENTER),
                 ("plies", "手数", 50, tk.E), ("source", "出典", 80, tk.W)):
             self.prec_tv.heading(col, text=label)
@@ -250,7 +254,8 @@ class PrecedentViewer:
             code = usi_to_move16(c.usi)
             label = (move16_to_ki2(position, code) if code is not None
                      else "(終局)" if c.usi == "(end)" else c.usi)
-            decided = c.black_wins + c.white_wins
+            # 引き分けは後手勝ち扱いで先手勝率を算出する
+            decided = c.black_wins + c.white_wins + c.draws
             rate = f"{c.black_wins / decided * 100:.1f}%" if decided else "-"
             self.cand_tv.insert("", tk.END, values=(
                 rank, label, c.game_count, c.black_wins, c.white_wins,

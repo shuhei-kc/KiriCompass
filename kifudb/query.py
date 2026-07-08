@@ -10,6 +10,9 @@ from .analysis import decode_evals, decode_pvs
 from .board import move16_to_usi, normalize_sfen_main, position_key_from_sfen
 from .db import open_read_only
 
+# 前例一覧の1ページあたりの件数 (GUI・CLI・APIのデフォルトを一元管理)
+DEFAULT_PAGE_SIZE = 1000
+
 REASON_JA = {
     "toryo": "投了", "time_up": "時間切れ", "illegal_move": "反則負け",
     "illegal_action": "反則行為", "sennichite": "千日手",
@@ -114,7 +117,7 @@ class PrecedentReader:
     def __exit__(self, *_exc) -> None:
         self.close()
 
-    def lookup(self, sfen: str, max_precedents: int = 500):
+    def lookup(self, sfen: str, max_precedents: int = DEFAULT_PAGE_SIZE):
         """Return (candidates, precedents, total_games) for a position."""
         sfen_main = normalize_sfen_main(sfen)
         key = position_key_from_sfen(sfen_main)
@@ -140,7 +143,7 @@ class PrecedentReader:
         precedents = self.precedents_page(sfen, limit=max_precedents)
         return candidates, precedents, total_games
 
-    def precedents_page(self, sfen: str, limit: int = 500,
+    def precedents_page(self, sfen: str, limit: int = DEFAULT_PAGE_SIZE,
                         before: tuple[str, int] | None = None) -> "list[Precedent]":
         """One page of precedents, newest first.
 
@@ -193,7 +196,8 @@ class PrecedentReader:
         return detail
 
 
-def lookup(db_path: str | Path, sfen: str, max_precedents: int = 500):
+def lookup(db_path: str | Path, sfen: str,
+           max_precedents: int = DEFAULT_PAGE_SIZE):
     """One-shot variant of PrecedentReader.lookup (opens/closes per call)."""
     with PrecedentReader(db_path) as reader:
         return reader.lookup(sfen, max_precedents)
@@ -238,7 +242,8 @@ def format_report(sfen: str, candidates, precedents, total_games: int) -> str:
     if candidates:
         lines.append("No. 指し手        USI     出現   先手勝  後手勝  引分   勝率")
         for rank, c in enumerate(candidates, start=1):
-            decided = c.black_wins + c.white_wins
+            # 引き分けは後手勝ち扱いで先手勝率を算出する
+            decided = c.black_wins + c.white_wins + c.draws
             rate = (f"{c.black_wins / decided * 100:5.1f}%" if decided else "   -  ")
             lines.append(f"{rank:>3} {ki2(c.usi) if c.usi != '(end)' else '(終局)':<12}"
                          f" {c.usi:<7} {c.game_count:>5} {c.black_wins:>7} "

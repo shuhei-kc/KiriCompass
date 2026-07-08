@@ -2,7 +2,7 @@
 """CLI: look up precedents for a position and print/save a text report.
 
 Usage:
-    python3 tools/lookup.py <db_path> "<sfen>" [--out report.txt] [--limit 500]
+    python3 tools/lookup.py <db_path> "<sfen>" [--out report.txt] [--limit N]
 
 The move-counter part of the sfen is ignored, as are leading
 "position sfen" / "sfen" prefixes. "startpos" is also accepted.
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from kifudb.query import format_report, lookup  # noqa: E402
+from kifudb.query import DEFAULT_PAGE_SIZE, format_report, lookup  # noqa: E402
 
 
 def main() -> None:
@@ -21,7 +21,7 @@ def main() -> None:
     parser.add_argument("db_path")
     parser.add_argument("sfen")
     parser.add_argument("--out", default=None, help="write report to this file")
-    parser.add_argument("--limit", type=int, default=500)
+    parser.add_argument("--limit", type=int, default=DEFAULT_PAGE_SIZE)
     args = parser.parse_args()
 
     candidates, precedents, total = lookup(args.db_path, args.sfen, args.limit)
