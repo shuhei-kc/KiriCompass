@@ -62,6 +62,7 @@ def pick_mono_font(root: tk.Tk) -> str:
 
 CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
 RESULT_JA = {1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
+WINNER_JA = {1: "先", 2: "後"}  # それ以外 (引分・結果なし) は "-"
 
 
 class PrecedentViewer:
@@ -149,8 +150,8 @@ class PrecedentViewer:
         for col, label, width, anchor in (
                 ("no", "No.", 44, tk.E),
                 ("date", "対局日", 110, tk.W), ("black", "先手", 170, tk.W),
-                ("white", "後手", 170, tk.W), ("next", "次の一手", 120, tk.W),
-                ("result", "結果", 60, tk.W), ("reason", "終局理由", 80, tk.W),
+                ("white", "後手", 170, tk.W), ("next", "次の一手", 96, tk.CENTER),
+                ("result", "勝者", 44, tk.CENTER), ("reason", "終局理由", 68, tk.CENTER),
                 ("plies", "手数", 50, tk.E), ("source", "出典", 80, tk.W)):
             self.prec_tv.heading(col, text=label)
             self.prec_tv.column(col, width=width, anchor=anchor,
@@ -256,7 +257,8 @@ class PrecedentViewer:
             self.prec_tv.insert("", tk.END, iid=str(index), values=(
                 index + 1, p.started_at[:10].replace("-", "/"),
                 p.black_name, p.white_name, next_label,
-                RESULT_JA.get(p.result, "?"), REASON_JA.get(p.end_reason, p.end_reason),
+                WINNER_JA.get(p.result, "-"),
+                REASON_JA.get(p.end_reason, p.end_reason),
                 p.ply_count, p.source))
 
         self._set_detail("前例を選択すると評価値・読み筋・URLを表示します。")
