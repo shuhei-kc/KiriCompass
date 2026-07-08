@@ -137,7 +137,25 @@ class PrecedentReader:
                     "ORDER BY COUNT(*) DESC", (key,))]
         total_games = sum(c.game_count for c in candidates)
 
-        precedents = [
+        precedents = self.precedents_page(sfen, limit=max_precedents)
+        return candidates, precedents, total_games
+
+    def precedents_page(self, sfen: str, limit: int = 500,
+                        before: tuple[str, int] | None = None) -> "list[Precedent]":
+        """One page of precedents, newest first.
+
+        `before` = (started_at, game_id) of the last row already shown;
+        keyset pagination keeps both the query cost and the caller's memory
+        proportional to one page regardless of how deep the user scrolls.
+        """
+        key = position_key_from_sfen(normalize_sfen_main(sfen))
+        condition, params = "", [key]
+        if before is not None:
+            condition = ("AND (COALESCE(g.started_at,'') < ? OR "
+                         "(COALESCE(g.started_at,'') = ? AND g.game_id < ?))")
+            params += [before[0], before[0], before[1]]
+        params.append(limit)
+        return [
             Precedent(game_id=r[0], event=r[1], source=r[2], started_at=r[3] or "",
                       black_name=r[4], white_name=r[5],
                       next_move_usi=move16_to_usi(r[6]) if r[6] else "",
@@ -147,9 +165,9 @@ class PrecedentReader:
                 "       g.black_name, g.white_name, pg.next_move, "
                 "       g.result, g.end_reason, pg.ply, g.ply_count "
                 "FROM position_games pg JOIN games g USING (game_id) "
-                "WHERE pg.position_key = ? "
-                "ORDER BY g.started_at DESC LIMIT ?", (key, max_precedents))]
-        return candidates, precedents, total_games
+                f"WHERE pg.position_key = ? {condition} "
+                "ORDER BY COALESCE(g.started_at,'') DESC, g.game_id DESC "
+                "LIMIT ?", params)]
 
     def get_game(self, game_id: int) -> "GameDetail | None":
         row = self.conn.execute(

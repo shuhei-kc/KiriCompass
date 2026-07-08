@@ -28,6 +28,7 @@ from kifudb.query import PrecedentReader, REASON_JA, format_report  # noqa: E402
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR  # noqa: E402
 
 SYNC_POLL_MS = 300
+PAGE_SIZE = 500
 
 # 等幅かつ日本語対応のフォントをOSごとに優先順で探す。
 MONO_FONT_CANDIDATES = [
@@ -73,6 +74,7 @@ class PrecedentViewer:
 
         self.precedents = []
         self.query_position: Position | None = None
+        self._total_games = 0
         self._sync_mtime: float | None = None
         self._search_running = False
         self._sync_file = DEFAULT_SYNC_FILE  # runtime/gui_config.json で上書き可
@@ -129,17 +131,17 @@ class PrecedentViewer:
         panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         cand_frame = ttk.LabelFrame(panes, text="候補手")
-        cand_cols = ("no", "move", "usi", "count", "black", "white", "draw", "rate")
+        cand_cols = ("no", "move", "count", "black", "white", "draw", "rate")
         self.cand_tv = ttk.Treeview(cand_frame, columns=cand_cols,
                                     show="headings", height=6)
         for col, label, width, anchor in (
                 ("no", "No.", 44, tk.E),
-                ("move", "指し手", 140, tk.W), ("usi", "USI", 70, tk.W),
+                ("move", "指し手", 110, tk.CENTER),
                 ("count", "出現", 70, tk.E), ("black", "先手勝", 70, tk.E),
                 ("white", "後手勝", 70, tk.E), ("draw", "引分", 60, tk.E),
                 ("rate", "先手勝率", 80, tk.E)):
             self.cand_tv.heading(col, text=label)
-            self.cand_tv.column(col, width=width, anchor=anchor, stretch=(col == "move"))
+            self.cand_tv.column(col, width=width, anchor=anchor, stretch=False)
         self.cand_tv.pack(fill=tk.BOTH, expand=True)
         panes.add(cand_frame, weight=1)
 
@@ -177,6 +179,9 @@ class PrecedentViewer:
         ttk.Label(bottom, textvariable=self.status_var).pack(side=tk.LEFT)
         ttk.Button(bottom, text="レポート保存...",
                    command=self._save_report).pack(side=tk.RIGHT)
+        self.more_button = ttk.Button(bottom, text=f"さらに{PAGE_SIZE}件表示",
+                                      command=self._load_more, state=tk.DISABLED)
+        self.more_button.pack(side=tk.RIGHT, padx=6)
 
     # -- actions ---------------------------------------------------------
 
@@ -236,7 +241,8 @@ class PrecedentViewer:
         self._search_running = False
         self.search_button.config(state=tk.NORMAL)
         self.query_position = position
-        self.precedents = precedents
+        self.precedents = []
+        self._total_games = total
 
         self.cand_tv.delete(*self.cand_tv.get_children())
         for rank, c in enumerate(candidates, start=1):
@@ -246,25 +252,62 @@ class PrecedentViewer:
             decided = c.black_wins + c.white_wins
             rate = f"{c.black_wins / decided * 100:.1f}%" if decided else "-"
             self.cand_tv.insert("", tk.END, values=(
-                rank, label, c.usi, c.game_count, c.black_wins, c.white_wins,
+                rank, label, c.game_count, c.black_wins, c.white_wins,
                 c.draws, rate))
 
         self.prec_tv.delete(*self.prec_tv.get_children())
-        for index, p in enumerate(precedents):
+        self._append_precedents(precedents)
+
+        self._set_detail("前例を選択すると評価値・読み筋・URLを表示します。")
+        self.status_var.set(
+            f"前例 {total}局 / 候補手 {len(candidates)}種 / 表示 {len(self.precedents)}件 "
+            f"({elapsed:.1f}ms)")
+
+    def _append_precedents(self, page) -> None:
+        """Append one page of precedents to the table (used by search & 続き)."""
+        start = len(self.precedents)
+        for offset, p in enumerate(page):
+            index = start + offset
             code = usi_to_move16(p.next_move_usi) if p.next_move_usi else None
-            next_label = (move16_to_ki2(position, code) if code is not None
-                          else "(終局)")
+            next_label = (move16_to_ki2(self.query_position, code)
+                          if code is not None else "(終局)")
             self.prec_tv.insert("", tk.END, iid=str(index), values=(
                 index + 1, p.started_at[:10].replace("-", "/"),
                 p.black_name, p.white_name, next_label,
                 WINNER_JA.get(p.result, "-"),
                 REASON_JA.get(p.end_reason, p.end_reason),
                 p.ply_count, p.source))
+        self.precedents.extend(page)
+        # ページが満杯 = まだ続きがある可能性が高い
+        self.more_button.config(
+            state=tk.NORMAL if len(page) == PAGE_SIZE else tk.DISABLED)
 
-        self._set_detail("前例を選択すると評価値・読み筋・URLを表示します。")
+    def _load_more(self) -> None:
+        if self._search_running or not self.precedents:
+            return
+        last = self.precedents[-1]
+        before = (last.started_at, last.game_id)
+        db_path = self.db_var.get().strip()
+        sfen = self.sfen_var.get().strip()
+        self._search_running = True
+        self.more_button.config(state=tk.DISABLED)
+        self.status_var.set("続きを取得中...")
+
+        def task():
+            try:
+                page = self._get_reader(db_path).precedents_page(
+                    sfen, limit=PAGE_SIZE, before=before)
+                self.root.after(0, self._show_more, page)
+            except Exception as exc:  # noqa: BLE001
+                self.root.after(0, self._show_error, str(exc))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _show_more(self, page) -> None:
+        self._search_running = False
+        self._append_precedents(page)
         self.status_var.set(
-            f"前例 {total}局 / 候補手 {len(candidates)}種 / 表示 {len(precedents)}件 "
-            f"({elapsed:.1f}ms)")
+            f"前例 {self._total_games}局 / 表示 {len(self.precedents)}件")
 
     def _on_precedent_select(self, _event=None) -> None:
         p = self._selected_precedent()
