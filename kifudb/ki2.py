@@ -1,4 +1,4 @@
-"""KI2 (棋譜表記) move formatting: ▲７六歩 / △同　銀 / ▲５八金左 など.
+"""KI2 (棋譜表記) move formatting: ☗７六歩 / ☖同　銀 / ☗５八金左 など.
 
 日本将棋連盟の表記規則に従い、同じ地点へ動ける同種の駒がある場合のみ
 左/右/直/上/引/寄 を付け、盤上の駒でも到達できる地点への駒打ちにのみ
@@ -124,7 +124,7 @@ def move16_to_ki2(pos: Position, code: int, prev_to: int | None = None) -> str:
     to = code & 0x7F
     frm = (code >> 7) & 0x7F
     color = pos.turn
-    mark = "▲" if color == BLACK else "△"
+    mark = "☗" if color == BLACK else "☖"
     dest = "同　" if prev_to == to else \
         f"{_FILE_ZEN[to // 9 + 1]}{_RANK_KAN[to % 9 + 1]}"
 
