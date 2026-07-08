@@ -67,6 +67,24 @@ def game_url(source: str, event: str, started_at: str = "",
     return None
 
 
+def tournament_label(source: str, event: str) -> str:
+    """Short tournament id for display/post text.
+
+    floodgate -> "floodgate", WCSC -> "WCSC35", 電竜戦 -> "dr6_production" 等。
+    """
+    if source in ("floodgate", "wdoor"):
+        return "floodgate"
+    prefix = event.split("+", 1)[0]
+    if source == "denryusen":
+        for pattern, replacement in _DENRYU_TOURNAMENT_RES:
+            if pattern.match(prefix):
+                return pattern.sub(replacement, prefix)
+        return prefix
+    if source == "wcsc":
+        return prefix
+    return source
+
+
 @dataclass
 class Candidate:
     usi: str

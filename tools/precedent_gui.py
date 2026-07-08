@@ -26,7 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kifudb.board import Position, normalize_sfen_main, usi_to_move16  # noqa: E402
 from kifudb.ki2 import format_pv_ki2, move16_to_ki2  # noqa: E402
 from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
-                          PrecedentReader, REASON_JA, format_report)
+                          PrecedentReader, REASON_JA, format_report,
+                          tournament_label)
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR  # noqa: E402
 
 SYNC_POLL_MS = 300
@@ -67,12 +68,14 @@ RESULT_JA = {1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
 WINNER_JA = {1: "先", 2: "後"}  # それ以外 (引分・結果なし) は "-"
 
 # Xポスト文言のテンプレート。runtime/post_template.txt を編集すれば
-# 再起動なしで反映される (初回使用時にこの内容で自動生成)。
-# 使える変数: {black} {white} {date} {result} {reason} {ply_count}
-#             {next_move} {source} {event} {url}
+# 再起動なしで反映される (ファイルがない時にこの内容で自動生成。
+# デフォルトに戻したい時はファイルを削除する)。
+# 使える変数: {tournament} {black} {white} {date} {ply} {next_move}
+#             {result} {reason} {ply_count} {source} {event} {url}
 POST_TEMPLATE_FILE = RUNTIME_DIR / "post_template.txt"
-DEFAULT_POST_TEMPLATE = """{black} vs {white}
-{date} {result}({reason}) {ply_count}手
+DEFAULT_POST_TEMPLATE = """{tournament}
+{date} {black} - {white}
+{ply}手目 {next_move}
 {url}"""
 
 
@@ -402,13 +405,15 @@ class PrecedentViewer:
             return
         code = usi_to_move16(p.next_move_usi) if p.next_move_usi else None
         context = {
+            "tournament": tournament_label(p.source, p.event),
             "black": p.black_name, "white": p.white_name,
             "date": p.started_at[:10].replace("-", "/"),
+            "ply": p.ply + 1,  # 次の一手の手数
+            "next_move": (move16_to_ki2(self.query_position, code)
+                          if code is not None and self.query_position else "(終局)"),
             "result": RESULT_JA.get(p.result, "不明"),
             "reason": REASON_JA.get(p.end_reason, p.end_reason),
             "ply_count": p.ply_count,
-            "next_move": (move16_to_ki2(self.query_position, code)
-                          if code is not None and self.query_position else ""),
             "source": p.source, "event": p.event, "url": p.url,
         }
         try:
