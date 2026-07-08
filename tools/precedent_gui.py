@@ -142,7 +142,8 @@ class PrecedentViewer:
                 ("rate", "先手勝率", 80, tk.E)):
             self.cand_tv.heading(col, text=label)
             self.cand_tv.column(col, width=width, anchor=anchor, stretch=False)
-        self.cand_tv.pack(fill=tk.BOTH, expand=True)
+        # 列幅の合計にウィジェット自体を合わせ、左に詰める
+        self.cand_tv.pack(side=tk.LEFT, fill=tk.Y)
         panes.add(cand_frame, weight=1)
 
         prec_frame = ttk.LabelFrame(panes, text="前例")
