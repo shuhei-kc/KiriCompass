@@ -126,6 +126,12 @@ def game_url(source: str, event: str, started_at: str = "",
         tournament = _denryusen_tournament(event)
         if tournament is None:
             return None
+        # 第1回本戦だけは SPA 以前の旧ビューア (単一HTML + '#<event>'、手数
+        # アンカー無し)。新しい大会は dist/#/<event>/<ply> のSPAルート。
+        # (dr1 は dist/ が 403、dist/denryusen_single.html が 200)
+        if tournament.startswith("dr1_"):
+            return (f"https://denryu-sen.jp/denryusen/{tournament}"
+                    f"/dist/denryusen_single.html#{event}")
         anchor = f"/{ply}" if ply else ""
         return f"https://denryu-sen.jp/denryusen/{tournament}/dist/#/{event}{anchor}"
     if source == "wcsc":
