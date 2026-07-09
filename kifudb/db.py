@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -48,12 +48,16 @@ CREATE TABLE IF NOT EXISTS game_analysis (
 );
 
 -- One row per (position, game, ply). This is the precedent index.
+-- sort_key (game start time, minutes since epoch UTC, 0 = unknown) is part
+-- of the key so that "newest N precedents" is a backward index range scan:
+-- no join-then-sort over every match, first query included.
 CREATE TABLE IF NOT EXISTS position_games (
     position_key INTEGER NOT NULL,          -- 64-bit position hash (signed)
+    sort_key     INTEGER NOT NULL,
     game_id      INTEGER NOT NULL,
     ply          INTEGER NOT NULL,          -- moves played to reach the position
     next_move    INTEGER NOT NULL,          -- move16 code, 0 = game ended here
-    PRIMARY KEY (position_key, game_id, ply)
+    PRIMARY KEY (position_key, sort_key, game_id, ply)
 ) WITHOUT ROWID;
 
 -- Aggregated candidate-move statistics, kept only for positions reached
@@ -92,11 +96,54 @@ def open_for_write(db_path: str | Path) -> sqlite3.Connection:
     # index outgrows the default 2MB cache (especially on external drives).
     conn.execute("PRAGMA cache_size=-262144")   # 256MB
     conn.execute("PRAGMA temp_store=MEMORY")
+    _migrate_if_needed(conn)
     conn.executescript(SCHEMA)
     conn.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version', ?)",
                  (str(SCHEMA_VERSION),))
     conn.commit()
     return conn
+
+
+def _migrate_if_needed(conn: sqlite3.Connection) -> None:
+    """In-place migration of older databases (currently: v2 -> v3)."""
+    import logging
+    log = logging.getLogger("kifudb.db")
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    except sqlite3.OperationalError:
+        return  # fresh database
+    if row is None or int(row[0]) >= SCHEMA_VERSION:
+        return
+    version = int(row[0])
+    if version == 2:
+        log.info("migrating schema v2 -> v3 (rebuilding position index "
+                 "with date sort key; this can take a while)...")
+        conn.executescript("""
+            CREATE TABLE position_games_v3 (
+                position_key INTEGER NOT NULL,
+                sort_key     INTEGER NOT NULL,
+                game_id      INTEGER NOT NULL,
+                ply          INTEGER NOT NULL,
+                next_move    INTEGER NOT NULL,
+                PRIMARY KEY (position_key, sort_key, game_id, ply)
+            ) WITHOUT ROWID;
+            INSERT INTO position_games_v3
+                SELECT pg.position_key,
+                       COALESCE(CAST(strftime('%s', g.started_at) AS INTEGER) / 60, 0),
+                       pg.game_id, pg.ply, pg.next_move
+                FROM position_games pg JOIN games g USING (game_id)
+                ORDER BY 1, 2, 3, 4;
+            DROP TABLE position_games;
+            ALTER TABLE position_games_v3 RENAME TO position_games;
+            UPDATE meta SET value='3' WHERE key='schema_version';
+        """)
+        conn.commit()
+        conn.execute("VACUUM")
+        log.info("migration to v3 complete")
+    else:
+        raise RuntimeError(
+            f"unsupported schema version {version}; rebuild the database")
 
 
 def open_read_only(db_path: str | Path) -> sqlite3.Connection:

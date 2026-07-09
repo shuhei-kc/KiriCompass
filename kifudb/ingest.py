@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import array
+import calendar
 import logging
 import re
 import sqlite3
@@ -23,6 +24,19 @@ _SOURCE_PATTERNS = [
     (re.compile(r"^wcsc", re.I), "wcsc"),
     (re.compile(r"^dr\d", re.I), "denryusen"),
 ]
+
+
+def date_sort_key(started_at: str) -> int:
+    """'YYYY-MM-DD HH:MM:SS' -> minutes since epoch (UTC), 0 if unknown.
+
+    Must stay consistent with the SQL expression used in the v2->v3
+    migration: strftime('%s', started_at) / 60.
+    """
+    try:
+        return calendar.timegm(time.strptime(started_at,
+                                             "%Y-%m-%d %H:%M:%S")) // 60
+    except (ValueError, TypeError):
+        return 0
 
 
 def detect_source(event_or_name: str) -> str:
@@ -166,12 +180,13 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
 
     rows = []
     n_moves = len(rec.moves)
+    sort_key = date_sort_key(rec.start_time)
     for ply, position_key in enumerate(rec.sfen_keys):
         next_move = rec.moves[ply] if ply < n_moves else 0
-        rows.append((position_key, game_id, ply, next_move))
+        rows.append((position_key, sort_key, game_id, ply, next_move))
         touched_keys.add(position_key)
     conn.executemany(
-        "INSERT OR IGNORE INTO position_games VALUES (?,?,?,?)", rows)
+        "INSERT OR IGNORE INTO position_games VALUES (?,?,?,?,?)", rows)
     stats.added += 1
     return "ok", None, game_id
 

@@ -74,8 +74,10 @@ WINNER_JA = {1: "先", 2: "後"}  # それ以外 (引分・結果なし) は "-"
 #             {result} {reason} {ply_count} {source} {event} {url}
 POST_TEMPLATE_FILE = RUNTIME_DIR / "post_template.txt"
 DEFAULT_POST_TEMPLATE = """{tournament}
-{date} {black} - {white}
+
+{date}　{black} - {white}
 {ply}手目 {next_move}
+
 {url}"""
 
 
@@ -327,7 +329,7 @@ class PrecedentViewer:
         if self._search_running or not self.precedents:
             return
         last = self.precedents[-1]
-        before = (last.started_at, last.game_id)
+        before = (last.sort_key, last.game_id)
         db_path = self.db_var.get().strip()
         sfen = self.sfen_var.get().strip()
         self._search_running = True

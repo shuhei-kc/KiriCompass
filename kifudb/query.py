@@ -107,6 +107,7 @@ class Precedent:
     end_reason: str
     ply: int
     ply_count: int
+    sort_key: int = 0           # keyset pagination cursor (see precedents_page)
 
     @property
     def url(self) -> str | None:
@@ -162,32 +163,38 @@ class PrecedentReader:
         return candidates, precedents, total_games
 
     def precedents_page(self, sfen: str, limit: int = DEFAULT_PAGE_SIZE,
-                        before: tuple[str, int] | None = None) -> "list[Precedent]":
+                        before: tuple[int, int] | None = None) -> "list[Precedent]":
         """One page of precedents, newest first.
 
-        `before` = (started_at, game_id) of the last row already shown;
-        keyset pagination keeps both the query cost and the caller's memory
-        proportional to one page regardless of how deep the user scrolls.
+        The date lives inside the position_games primary key, so this is a
+        backward index range scan: only `limit` rows are read and joined,
+        with no sort step — the first (cold-cache) query on a position with
+        a million precedents costs the same as any other.
+
+        `before` = (sort_key, game_id) of the last row already shown
+        (keyset pagination; both values are on the returned Precedent).
         """
         key = position_key_from_sfen(normalize_sfen_main(sfen))
         condition, params = "", [key]
         if before is not None:
-            condition = ("AND (COALESCE(g.started_at,'') < ? OR "
-                         "(COALESCE(g.started_at,'') = ? AND g.game_id < ?))")
+            condition = ("AND (pg.sort_key < ? OR "
+                         "(pg.sort_key = ? AND pg.game_id < ?))")
             params += [before[0], before[0], before[1]]
         params.append(limit)
         return [
             Precedent(game_id=r[0], event=r[1], source=r[2], started_at=r[3] or "",
                       black_name=r[4], white_name=r[5],
                       next_move_usi=move16_to_usi(r[6]) if r[6] else "",
-                      result=r[7], end_reason=r[8], ply=r[9], ply_count=r[10])
+                      result=r[7], end_reason=r[8], ply=r[9], ply_count=r[10],
+                      sort_key=r[11])
             for r in self.conn.execute(
                 "SELECT g.game_id, g.event, g.source, g.started_at, "
                 "       g.black_name, g.white_name, pg.next_move, "
-                "       g.result, g.end_reason, pg.ply, g.ply_count "
+                "       g.result, g.end_reason, pg.ply, g.ply_count, "
+                "       pg.sort_key "
                 "FROM position_games pg JOIN games g USING (game_id) "
                 f"WHERE pg.position_key = ? {condition} "
-                "ORDER BY COALESCE(g.started_at,'') DESC, g.game_id DESC "
+                "ORDER BY pg.sort_key DESC, pg.game_id DESC "
                 "LIMIT ?", params)]
 
     def get_game(self, game_id: int) -> "GameDetail | None":

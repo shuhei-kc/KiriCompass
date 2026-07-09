@@ -39,11 +39,16 @@ games (
 
 position_games (               -- 前例インデックス本体
     position_key INTEGER,      -- 局面の64bitハッシュ (手数無視・符号付き格納)
+    sort_key     INTEGER,      -- 対局開始時刻 (epoch分, 不明=0)
     game_id      INTEGER,
     ply          INTEGER,      -- この局面に到達した時点の手数 (0=初期局面)
     next_move    INTEGER,      -- 次の一手 move16, 0=ここで終局
-    PRIMARY KEY (position_key, game_id, ply)
+    PRIMARY KEY (position_key, sort_key, game_id, ply)
 ) WITHOUT ROWID
+-- 日付をキーに含めるのが重要: 「新しい順に上位N件」が索引の逆走査だけで
+-- 取れるため、前例100万件の局面でも読むのはN行分のみ (結合・ソート不要)。
+-- v2ではここで全前例の結合+ソートが走り、初期局面の初回検索が数十秒
+-- かかっていた。旧DBは次回のDB更新実行時に自動移行される (schema v3)。
 
 position_stats (               -- 候補手集計。2局以上が到達した局面のみ保持
     position_key INTEGER, next_move INTEGER,
