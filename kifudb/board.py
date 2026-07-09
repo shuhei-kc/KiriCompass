@@ -39,6 +39,26 @@ HIRATE_BOARD_SFEN = "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL"
 # Full piece set (type -> count) for hirate, used for P+/P- "AL".
 FULL_SET = {FU: 18, KY: 4, KE: 4, GI: 4, KI: 4, KA: 2, HI: 2, OU: 2}
 
+# --- 移動オフセット (先手視点; dr<0 が前方=上。後手は dr を反転) -----------
+# (df, dr): file_index差, rank_index差。sq = file*9 + rank。
+_GOLD = ((0, -1), (1, -1), (-1, -1), (1, 0), (-1, 0), (0, 1))
+_SILVER = ((0, -1), (1, -1), (-1, -1), (1, 1), (-1, 1))
+_KING = tuple((df, dr) for df in (-1, 0, 1) for dr in (-1, 0, 1)
+              if (df, dr) != (0, 0))
+_KNIGHT = ((1, -2), (-1, -2))
+_PAWN = ((0, -1),)
+_LANCE = ((0, -1),)
+_BISHOP = ((1, 1), (1, -1), (-1, 1), (-1, -1))
+_ROOK = ((0, 1), (0, -1), (1, 0), (-1, 0))
+# 1マスだけ動く成分 (歩や桂は成り駒=金の動き; 馬=飛の直進1歩, 龍=角の斜め1歩)
+_STEP_OFFSETS = {
+    FU: _PAWN, KE: _KNIGHT, GI: _SILVER, KI: _GOLD, OU: _KING,
+    TO: _GOLD, NY: _GOLD, NK: _GOLD, NG: _GOLD, UM: _ROOK, RY: _BISHOP,
+}
+# 走り駒の方向
+_SLIDE_OFFSETS = {KY: _LANCE, KA: _BISHOP, HI: _ROOK, UM: _BISHOP, RY: _ROOK}
+_PROMOTABLE = frozenset((FU, KY, KE, GI, KA, HI))
+
 
 def unpromote(t: int) -> int:
     if t < TO:
@@ -200,6 +220,87 @@ class Position:
 
     def position_key(self) -> int:
         return position_key_from_sfen(self.sfen_key_string())
+
+    # -- 擬似合法手生成 ----------------------------------------------------
+    # 注意: これは「擬似合法手」生成であり、真の合法手生成ではない。駒の動き
+    # (二歩・行き所のない駒・成りの可否) だけを守り、王手放置(自玉が取られる手)
+    # や打ち歩詰めはチェックしない。合流数の計算では、そうした反則手が作る局面
+    # には実対局が存在せず合流0になるため無害。正確性が要る用途や大規模サイトへ
+    # の転用時は、本物の合法手生成に差し替えること。
+
+    def _emit_move(self, moves, frm, to, ptype, promo_zone, last_rank,
+                   knight_ban) -> None:
+        to_rank = to % 9
+        from_rank = frm % 9
+        can_promo = (ptype in _PROMOTABLE
+                     and (from_rank in promo_zone or to_rank in promo_zone))
+        must_promo = ((ptype in (FU, KY) and to_rank == last_rank)
+                      or (ptype == KE and to_rank in knight_ban))
+        if not must_promo:
+            moves.append(to | (frm << 7))
+        if can_promo:
+            moves.append(to | (frm << 7) | (1 << 14))
+
+    def pseudo_legal_moves(self) -> "list[int]":
+        """手番側の擬似合法手を move16 のリストで返す (真の合法手ではない)。"""
+        color = self.turn
+        black = color == BLACK
+        promo_zone = (0, 1, 2) if black else (6, 7, 8)
+        last_rank = 0 if black else 8
+        knight_ban = (0, 1) if black else (7, 8)
+        moves: list[int] = []
+
+        for sq in range(81):
+            piece = self.board[sq]
+            if piece is None or piece[0] != color:
+                continue
+            ptype = piece[1]
+            f0, r0 = sq // 9, sq % 9
+            for df, dr in _SLIDE_OFFSETS.get(ptype, ()):
+                if not black:
+                    dr = -dr
+                f, r = f0 + df, r0 + dr
+                while 0 <= f <= 8 and 0 <= r <= 8:
+                    tp = self.board[f * 9 + r]
+                    if tp is not None and tp[0] == color:
+                        break
+                    self._emit_move(moves, sq, f * 9 + r, ptype, promo_zone,
+                                    last_rank, knight_ban)
+                    if tp is not None:
+                        break
+                    f += df
+                    r += dr
+            for df, dr in _STEP_OFFSETS.get(ptype, ()):
+                if not black:
+                    dr = -dr
+                f, r = f0 + df, r0 + dr
+                if 0 <= f <= 8 and 0 <= r <= 8:
+                    tp = self.board[f * 9 + r]
+                    if tp is not None and tp[0] == color:
+                        continue
+                    self._emit_move(moves, sq, f * 9 + r, ptype, promo_zone,
+                                    last_rank, knight_ban)
+
+        # 持ち駒を打つ (二歩・行き所のない駒だけ避ける)
+        hand = self.hands[color]
+        pawn_files = {s // 9 for s in range(81)
+                      if self.board[s] is not None
+                      and self.board[s][0] == color and self.board[s][1] == FU}
+        for t in range(7):
+            if hand[t] == 0:
+                continue
+            for sq in range(81):
+                if self.board[sq] is not None:
+                    continue
+                r = sq % 9
+                if t == FU and (r == last_rank or sq // 9 in pawn_files):
+                    continue
+                if t == KY and r == last_rank:
+                    continue
+                if t == KE and r in knight_ban:
+                    continue
+                moves.append(sq | ((81 + t) << 7))
+        return moves
 
 
 def position_key_from_sfen(sfen_main: str) -> int:

@@ -165,7 +165,8 @@ class PrecedentViewer:
         # PanedWindowのペインは全幅に広がるため、コンテナを挟んで
         # 枠線(LabelFrame)ごと列幅に合わせて左詰めにする
         cand_holder = ttk.Frame(panes)
-        cand_frame = ttk.LabelFrame(cand_holder, text="候補手")
+        cand_frame = ttk.LabelFrame(
+            cand_holder, text="候補手 (灰色=前例なしだが合流する手・擬似合法手ベース)")
         cand_frame.pack(side=tk.LEFT, fill=tk.Y)
         cand_cols = ("no", "move", "count", "black", "white", "draw", "rate",
                      "confl")
@@ -179,6 +180,7 @@ class PrecedentViewer:
                 ("rate", "先手勝率", 80, tk.E), ("confl", "合流", 60, tk.E)):
             self.cand_tv.heading(col, text=label)
             self.cand_tv.column(col, width=width, anchor=anchor, stretch=False)
+        self.cand_tv.tag_configure("transposition", foreground="gray")
         # 列幅の合計にウィジェット自体を合わせ、左に詰める
         self.cand_tv.pack(side=tk.LEFT, fill=tk.Y)
         panes.add(cand_holder, weight=1)
@@ -303,9 +305,11 @@ class PrecedentViewer:
             reader = self._get_reader(db_path)
             candidates, precedents, total = reader.lookup(sfen)
             confluence = reader.confluence_counts(sfen, candidates)
+            transpositions = reader.transposition_moves(sfen, candidates)
             elapsed = (time.perf_counter() - started) * 1000
             self.root.after(0, self._show_results, position, candidates,
-                            precedents, total, elapsed, confluence)
+                            precedents, total, elapsed, confluence,
+                            transpositions)
         except Exception as exc:  # noqa: BLE001 - surface everything to the user
             self.root.after(0, self._show_error, str(exc))
 
@@ -316,7 +320,7 @@ class PrecedentViewer:
         messagebox.showerror("検索エラー", message)
 
     def _show_results(self, position, candidates, precedents, total, elapsed,
-                      confluence=None) -> None:
+                      confluence=None, transpositions=None) -> None:
         self._search_running = False
         self.search_button.config(state=tk.NORMAL)
         self.query_position = position
@@ -336,6 +340,13 @@ class PrecedentViewer:
             self.cand_tv.insert("", tk.END, values=(
                 rank, label, c.game_count, c.black_wins, c.white_wins,
                 c.draws, rate, merged or ""))
+        # 前例ゼロだが指すと既存対局に合流する手 (擬似合法手ベース)。出現・勝率は
+        # 空欄にし、合流数だけをグレーで表示する。
+        for usi, merged in (transpositions or []):
+            code = usi_to_move16(usi)
+            label = move16_to_ki2(position, code) if code is not None else usi
+            self.cand_tv.insert("", tk.END, tags=("transposition",), values=(
+                "", label, "", "", "", "", "", merged))
 
         self.prec_tv.delete(*self.prec_tv.get_children())
         self._append_precedents(precedents)

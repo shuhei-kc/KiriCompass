@@ -270,6 +270,42 @@ class PrecedentReader:
             out[c.usi] = max(total - c.game_count, 0)
         return out
 
+    def transposition_moves(self, sfen: str, candidates) -> "list[tuple[str, int]]":
+        """この局面で前例が無いが、指すと既存対局に合流する手を返す。
+
+        戻り値: [(usi, 合流数), ...] 合流数>0 のみ、降順。
+        擬似合法手 (board.Position.pseudo_legal_moves) を1手ずつ試し、到達局面に
+        対局があるものを拾う。王手放置・打ち歩詰め等は未チェックだが、それらが
+        作る局面には実対局が無く合流0になるため結果に混じらない。正確な合法手
+        生成ではないので、大規模用途では要改修。
+        """
+        from .board import Position, apply_move16, move16_to_usi
+        played = {c.usi for c in candidates}
+        pos = Position()
+        pos.set_sfen(normalize_sfen_main(sfen))
+        out: list[tuple[str, int]] = []
+        for code in pos.pseudo_legal_moves():
+            usi = move16_to_usi(code)
+            if usi in played:
+                continue
+            nxt = pos.copy()
+            try:
+                apply_move16(nxt, code)
+            except (ValueError, KeyError, TypeError):
+                continue
+            key = nxt.position_key()
+            total = self.conn.execute(
+                "SELECT SUM(game_count) FROM position_stats "
+                "WHERE position_key = ?", (key,)).fetchone()[0]
+            if total is None:
+                total = self.conn.execute(
+                    "SELECT COUNT(*) FROM position_games "
+                    "WHERE position_key = ?", (key,)).fetchone()[0]
+            if total:
+                out.append((usi, total))
+        out.sort(key=lambda x: -x[1])
+        return out
+
     def precedents_page(self, sfen: str, limit: int = DEFAULT_PAGE_SIZE,
                         before: tuple[int, int] | None = None) -> "list[Precedent]":
         """One page of precedents, newest first.
