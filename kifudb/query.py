@@ -457,16 +457,18 @@ def compute_source_intervals(db_path: str | Path, progress=None,
                              batch: int = 50000):
     """出典→game_id 連続区間 (島) を専用接続で計算する (バックグラウンド用)。
 
-    戻り値: (intervals, max_gid)。PrecedentReader.set_source_intervals に
-    渡してキャッシュを温める。読み取り専用の別接続で走るため、進行中も
+    戻り値: (intervals, max_gid, count)。PrecedentReader.set_source_intervals
+    に渡してキャッシュを温める。読み取り専用の別接続で走るため、進行中も
     検索など他の処理をブロックしない (WALの読み取り同士は競合しない)。
     progress(done, total) を渡すとバッチごとに呼ばれる (total は概算)。
+    count (総対局数) は max_gid と合わせてキャッシュ有効性の検証キーになる。
     """
+    import time as _time
     conn = open_read_only(db_path)
     try:
         max_gid = conn.execute("SELECT MAX(game_id) FROM games").fetchone()[0]
         if max_gid is None:
-            return [], None
+            return [], None, 0
         intervals: list[tuple[str, int, int]] = []
         run_src, run_lo, run_hi = None, 0, 0
         cursor = conn.execute(
@@ -486,9 +488,11 @@ def compute_source_intervals(db_path: str | Path, progress=None,
             done += len(rows)
             if progress:
                 progress(done, max_gid)
+            # バッチ間で一呼吸置き、同時に走る検索クエリへI/Oを譲る
+            _time.sleep(0.002)
         if run_src is not None:
             intervals.append((run_src, run_lo, run_hi))
-        return intervals, max_gid
+        return intervals, max_gid, done
     finally:
         conn.close()
 

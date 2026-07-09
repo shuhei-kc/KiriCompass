@@ -34,6 +34,7 @@ from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
                           PrecedentReader, REASON_JA,
                           compute_source_intervals, format_report,
                           tournament_label)
+from kifudb.db import open_read_only  # noqa: E402
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR  # noqa: E402
 
 SYNC_POLL_MS = 300
@@ -70,6 +71,48 @@ def pick_mono_font(root: tk.Tk) -> str:
     return "TkFixedFont"
 
 CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
+# 島表 (出典→game_id区間) の永続キャッシュ。DBが変わらない限り起動時の
+# 再計算 (gamesテーブル全走査) を丸ごと省ける。
+INTERVALS_CACHE_PATH = RUNTIME_DIR / "source_intervals.json"
+
+
+def load_interval_sidecar(db_path: str):
+    """前回起動時に計算した島表を、検証付きで読み込む。
+
+    DBの MAX(game_id) と総対局数が保存時と一致する場合だけ採用する
+    (増分取り込みや再構築があれば不一致になり、呼び出し側が再計算する)。
+    戻り値: (intervals, max_gid) または None。"""
+    try:
+        data = json.loads(INTERVALS_CACHE_PATH.read_text(encoding="utf-8"))
+        entry = data[str(Path(db_path).resolve())]
+        conn = open_read_only(db_path)
+        try:
+            max_gid, count = conn.execute(
+                "SELECT MAX(game_id), COUNT(*) FROM games").fetchone()
+        finally:
+            conn.close()
+        if entry["max_gid"] != max_gid or entry["count"] != count:
+            return None
+        return [tuple(iv) for iv in entry["intervals"]], max_gid
+    except Exception:  # noqa: BLE001 - 壊れた/無いキャッシュは再計算で賄う
+        return None
+
+
+def save_interval_sidecar(db_path: str, intervals, max_gid: int,
+                          count: int) -> None:
+    try:
+        try:
+            data = json.loads(INTERVALS_CACHE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        data[str(Path(db_path).resolve())] = {
+            "max_gid": max_gid, "count": count,
+            "intervals": [list(iv) for iv in intervals]}
+        INTERVALS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        INTERVALS_CACHE_PATH.write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # 保存失敗は次回再計算するだけ
 RESULT_JA = {1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
 WINNER_JA = {1: "先", 2: "後"}  # それ以外 (引分・結果なし) は "-"
 
@@ -401,8 +444,16 @@ class PrecedentViewer:
 
         def task():
             try:
-                intervals, max_gid = compute_source_intervals(
-                    db_path, progress)
+                # 前回起動時の結果が有効ならそれを使い、全走査を省く
+                cached = load_interval_sidecar(db_path)
+                if cached is not None:
+                    intervals, max_gid = cached
+                else:
+                    intervals, max_gid, count = compute_source_intervals(
+                        db_path, progress)
+                    if max_gid is not None:
+                        save_interval_sidecar(db_path, intervals,
+                                              max_gid, count)
                 if max_gid is not None:
                     self._interval_cache[db_path] = (intervals, max_gid)
                     # 属性の設定のみで接続は触らないためスレッドから直接
@@ -413,20 +464,28 @@ class PrecedentViewer:
             except Exception:  # noqa: BLE001 - 先読み失敗は同期計算で賄える
                 pass
             finally:
+                # 例外時も必ず event を立て、待機側の永久フリーズを防ぐ
                 self._interval_jobs.pop(db_path, None)
                 event.set()
                 self.root.after(0, self.filter_prep_var.set, "")
 
-        threading.Thread(target=task, daemon=True).start()
+        try:
+            threading.Thread(target=task, daemon=True).start()
+        except RuntimeError:
+            # スレッドが生成できなければジョブ登録を取り消して待機を解放
+            self._interval_jobs.pop(db_path, None)
+            event.set()
 
     def _wait_interval_prep(self, db_path: str) -> None:
         """島表の先読みが進行中なら完了を待つ (検索スレッド用)。
 
         待たずに同期計算すると同じ走査が二重に走り、I/Oを取り合って両方
-        遅くなるため、進行中の結果を使い回す。"""
+        遅くなるため、進行中の結果を使い回す。event は finally で必ず立つが、
+        遅い外付けドライブ等で長引く場合に備えタイムアウトを置く — 切れても
+        検索スレッド側の同期計算にフォールバックするだけで、正しく動く。"""
         event = self._interval_jobs.get(db_path)
         if event is not None:
-            event.wait()
+            event.wait(timeout=15.0)
 
     def _enabled_sources(self):
         """有効な出典キーの集合。全てONなら None (絞り込み無しの高速経路)。"""
