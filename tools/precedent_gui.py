@@ -112,13 +112,16 @@ class PrecedentViewer:
         self._search_running = False
         self._sync_file = DEFAULT_SYNC_FILE  # runtime/gui_config.json で上書き可
         self._reader: PrecedentReader | None = None
-        self._primed_dbs: set[str] = set()  # 島表を先読み済みのDBパス
+        # 出典絞り込み用の島表 (query.py参照) の先読み管理
+        self._interval_cache: dict[str, tuple] = {}          # db_path -> (islands, max_gid)
+        self._interval_jobs: dict[str, threading.Event] = {}  # 実行中の先読み
 
         self._setup_fonts()
         self._build_widgets()
         self._load_config()
         if len(sys.argv) > 1:
             self.db_var.set(sys.argv[1])
+        self._prime_source_intervals()  # 起動直後から先読みを始める
         self._poll_sync_file()
 
     def _setup_fonts(self) -> None:
@@ -285,6 +288,9 @@ class PrecedentViewer:
             self._reader = None
         if self._reader is None:
             self._reader = PrecedentReader(db_path)
+            cached = self._interval_cache.get(db_path)
+            if cached:
+                self._reader.set_source_intervals(*cached)
         return self._reader
 
     def search(self) -> None:
@@ -299,6 +305,7 @@ class PrecedentViewer:
             messagebox.showerror("エラー", "sfenを貼り付けてください。")
             return
         self._save_config()
+        self._prime_source_intervals()  # DBが変わっていたら先読みを開始
         self._search_running = True
         self.search_button.config(state=tk.DISABLED)
         self.status_var.set("検索中...")
@@ -316,6 +323,8 @@ class PrecedentViewer:
             reader = self._get_reader(db_path)
             # 候補手統計は常に全出典。前例一覧だけ出典フィルタを適用する。
             candidates, _, total = reader.lookup(sfen, max_precedents=0)
+            if sources is not None:
+                self._wait_interval_prep(db_path)
             precedents = reader.precedents_page(sfen, limit=PAGE_SIZE,
                                                 sources=sources)
             confluence = reader.confluence_counts(sfen, candidates)
@@ -371,18 +380,20 @@ class PrecedentViewer:
             f"前例 {total}局 / 候補手 {len(candidates)}種 / "
             f"表示 {len(self.precedents)}件 ({elapsed:.1f}ms)")
         self._refetch_if_filter_changed(sources)
-        self._prime_source_intervals()
 
     def _prime_source_intervals(self) -> None:
         """出典絞り込み用の島表をバックグラウンドで先読みする (DBごとに一度)。
 
-        専用の読み取り接続で走るため、検索など他の処理をブロックしない。
-        完了前にフィルタを切り替えた場合は、従来どおり検索スレッド側で
-        同期計算されるだけで、結果は同じ。"""
+        起動直後と検索開始時に呼ばれる。専用の読み取り接続で走るため、検索
+        など他の処理をブロックしない。失敗した場合は記録を消し、次の機会に
+        再試行する (絞り込み自体は検索スレッドの同期計算でも正しく動く)。"""
         db_path = self.db_var.get().strip()
-        if not db_path or db_path in self._primed_dbs:
+        if (not db_path or db_path in self._interval_cache
+                or db_path in self._interval_jobs
+                or not Path(db_path).is_file()):
             return
-        self._primed_dbs.add(db_path)
+        event = threading.Event()
+        self._interval_jobs[db_path] = event
 
         def progress(done, total):
             pct = min(done * 100 // max(total, 1), 99)
@@ -392,18 +403,30 @@ class PrecedentViewer:
             try:
                 intervals, max_gid = compute_source_intervals(
                     db_path, progress)
+                if max_gid is not None:
+                    self._interval_cache[db_path] = (intervals, max_gid)
+                    # 属性の設定のみで接続は触らないためスレッドから直接
+                    # 入れてよい。event を待つ検索スレッドが即座に使える。
+                    reader = self._reader
+                    if reader is not None and reader.db_path == db_path:
+                        reader.set_source_intervals(intervals, max_gid)
             except Exception:  # noqa: BLE001 - 先読み失敗は同期計算で賄える
-                intervals, max_gid = None, None
-
-            def install():
-                if (max_gid is not None and self._reader is not None
-                        and self._reader.db_path == db_path):
-                    self._reader.set_source_intervals(intervals, max_gid)
-                self.filter_prep_var.set("")
-
-            self.root.after(0, install)
+                pass
+            finally:
+                self._interval_jobs.pop(db_path, None)
+                event.set()
+                self.root.after(0, self.filter_prep_var.set, "")
 
         threading.Thread(target=task, daemon=True).start()
+
+    def _wait_interval_prep(self, db_path: str) -> None:
+        """島表の先読みが進行中なら完了を待つ (検索スレッド用)。
+
+        待たずに同期計算すると同じ走査が二重に走り、I/Oを取り合って両方
+        遅くなるため、進行中の結果を使い回す。"""
+        event = self._interval_jobs.get(db_path)
+        if event is not None:
+            event.wait()
 
     def _enabled_sources(self):
         """有効な出典キーの集合。全てONなら None (絞り込み無しの高速経路)。"""
@@ -439,6 +462,8 @@ class PrecedentViewer:
         def task():
             try:
                 started = time.perf_counter()
+                if sources is not None:
+                    self._wait_interval_prep(db_path)
                 page = self._get_reader(db_path).precedents_page(
                     sfen, limit=PAGE_SIZE, sources=sources)
                 elapsed = (time.perf_counter() - started) * 1000
@@ -497,6 +522,8 @@ class PrecedentViewer:
 
         def task():
             try:
+                if sources is not None:
+                    self._wait_interval_prep(db_path)
                 page = self._get_reader(db_path).precedents_page(
                     sfen, limit=PAGE_SIZE, before=before,
                     sources=sources, start_rank=start_rank)
