@@ -215,6 +215,10 @@ class PrecedentViewer:
                                         command=self._post_to_x,
                                         state=tk.DISABLED)
         self.post_x_button.pack(fill=tk.X, pady=(4, 0))
+        self.copy_kifu_button = ttk.Button(detail_buttons, text="棋譜コピー",
+                                           command=self._copy_kifu,
+                                           state=tk.DISABLED)
+        self.copy_kifu_button.pack(fill=tk.X, pady=(4, 0))
         self.open_file_button = ttk.Button(detail_buttons, text="ファイルで開く",
                                            command=self._open_kifu_file,
                                            state=tk.DISABLED)
@@ -368,6 +372,7 @@ class PrecedentViewer:
         button_state = tk.NORMAL if p.url else tk.DISABLED
         self.copy_url_button.config(state=button_state)
         self.post_x_button.config(state=button_state)
+        self.copy_kifu_button.config(state=tk.NORMAL)
         self.open_file_button.config(state=tk.NORMAL)
         lines = [f"{p.black_name} vs {p.white_name}  "
                  f"{p.started_at[:10].replace('-', '/')}  "
@@ -387,8 +392,8 @@ class PrecedentViewer:
             lines.append("評価値・読み筋の記録なし")
         if p.url:
             lines.append(f"URL: {p.url}")
-        lines.append("(ダブルクリック: 棋譜をコピー → ShogiHomeで Ctrl+V / ⌘V。"
-                     "元ファイルがあればその内容を使用)")
+        lines.append("(ダブルクリック: 棋譜ビューアをブラウザで開く。"
+                     "「棋譜コピー」でShogiHome用にクリップボードへコピー)")
         self._set_detail("\n".join(lines))
 
     def _kifu_text(self, game_id: int) -> tuple[str, str]:
@@ -408,7 +413,21 @@ class PrecedentViewer:
         return game_to_csa(detail), "DBから復元"
 
     def _on_precedent_open(self, _event=None) -> None:
-        """ダブルクリック: 棋譜をクリップボードへコピーする。
+        """ダブルクリック: 棋譜ビューアをブラウザで開く。
+
+        URLを持たない前例 (棋譜ビューア非対応の大会等) の場合は、代わりに
+        棋譜をクリップボードへコピーする (ShogiHome用) フォールバックを行う。"""
+        p = self._selected_precedent()
+        if p is None:
+            return
+        if p.url:
+            webbrowser.open(p.url)
+            self.status_var.set(f"棋譜ビューアを開きました: {p.url}")
+            return
+        self._copy_kifu()
+
+    def _copy_kifu(self) -> None:
+        """棋譜をクリップボードへコピーする。
 
         ShogiHomeは検討中のウィンドウに Ctrl+V (⌘V) で貼り付けられる。
         ファイル関連付けで開くと必ず新しいウィンドウが立つため、
