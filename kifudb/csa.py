@@ -2,6 +2,9 @@
 
 Produces normalized GameRecord objects. Handles:
 - V2/V2.2 headers, CRLF, cp932/utf-8/euc-jp encodings
+- CSAサーバプロトコル(Game_Summary)形式 (例: WCSC33): Name+:/Name-:/Game_ID:
+  ヘッダと、'%'終局行を持たず '#'状態行(#TIME_UP/#ILLEGAL_MOVE/#MAX_MOVES と
+  #WIN/#LOSE/#DRAW/#CENSORED)だけで終局する棋譜
 - PI (hirate), PI with removed pieces (handicap), explicit P1..P9 boards,
   P+/P- hand pieces including AL
 - comma-separated statements on one line
@@ -41,6 +44,27 @@ SPECIAL_TO_REASON = {
 # Reasons that leave the game with no winner.
 DRAW_REASONS = {"sennichite", "jishogi", "hikiwake", "max_moves"}
 NO_RESULT_REASONS = {"chudan", "matta", "error", "abnormal"}
+
+# CSAサーバプロトコル(Game_Summary形式; 例: WCSC33)の '#' 行対応。
+# '%'終局行を持たず、'#'状態行だけで終局する棋譜があるため補う。
+_HASH_REASON = {
+    "TORYO": "toryo", "RESIGN": "toryo", "TIME_UP": "time_up",
+    "ILLEGAL_MOVE": "illegal_move", "ILLEGAL_ACTION": "illegal_action",
+    "SENNICHITE": "sennichite", "OUTE_SENNICHITE": "oute_sennichite",
+    "JISHOGI": "jishogi", "KACHI": "kachi", "MAX_MOVES": "max_moves",
+    "MATTA": "matta", "CHUDAN": "chudan", "UCHIFUZUME": "uchifuzume",
+    "OUTE_KAIHIMORE": "oute_kaihimore", "TSUMI": "tsumi", "FUZUMI": "fuzumi",
+    "HIKIWAKE": "hikiwake",
+}
+# '#WIN'/'#LOSE'/'#DRAW' は Your_Turn 側から見た勝敗。'#CENSORED' は結果を
+# 確定させない (理由行 = MAX_MOVES 等から判定させる)。
+_HASH_RESULT = {"WIN": "win", "LOSE": "lose", "DRAW": "draw"}
+# Game_Summary ブロックのヘッダキー (警告を出さず読み飛ばす)。
+_SERVER_HEADER_KEYS = {
+    "Protocol_Version", "Protocol_Mode", "Format", "Declaration",
+    "Rematch_On_Draw", "To_Move", "Max_Moves", "Time_Unit", "Total_Time",
+    "Increment", "Least_Time_Per_Move", "Time_Roundup", "Game_ID_Duplication",
+}
 
 RESULT_DRAW, RESULT_BLACK, RESULT_WHITE = 0, 1, 2
 
@@ -148,6 +172,10 @@ def parse_csa(text: str, source_name: str = "") -> GameRecord:
     special: str | None = None
     special_sign = ""
     csa_moves: list[tuple[int, int, int, int]] = []
+    # CSAサーバ形式 (Game_Summary) 用: '#'行の終局理由/結果と手番視点
+    hash_reason: str | None = None
+    hash_result_side: str | None = None   # 'win' / 'lose' / 'draw'
+    your_turn_side = BLACK                 # Your_Turn: の解釈用 (既定は先手)
 
     eval_comments: dict[int, tuple[int, str]] = {}
 
@@ -182,6 +210,33 @@ def parse_csa(text: str, source_name: str = "") -> GameRecord:
             continue
         if st.startswith("N-"):
             rec.white_name = st[2:].strip()
+            continue
+        # --- CSAサーバプロトコル(Game_Summary)形式のヘッダ (例: WCSC33) ---
+        # N+/N-/$EVENT ではなく Name+:/Name-:/Game_ID: を用いる。
+        if st.startswith("Name+:"):
+            rec.black_name = st[6:].strip()
+            continue
+        if st.startswith("Name-:"):
+            rec.white_name = st[6:].strip()
+            continue
+        if st.startswith("Game_ID:"):
+            if not rec.event:
+                rec.event = st[8:].strip()
+            continue
+        if st.startswith("Your_Turn:"):
+            your_turn_side = WHITE if st[10:].strip().startswith("-") else BLACK
+            continue
+        if st.startswith("#"):
+            # サーバの状態/結果行。'%'終局行が無い場合の終局理由・勝敗を補う。
+            token = st[1:].strip().upper().replace(" ", "_")
+            if token in _HASH_RESULT:
+                if hash_result_side is None:
+                    hash_result_side = _HASH_RESULT[token]
+            elif token in _HASH_REASON:
+                if hash_reason is None:
+                    hash_reason = _HASH_REASON[token]
+            continue
+        if st.startswith(("BEGIN ", "END ")) or st.split(":", 1)[0] in _SERVER_HEADER_KEYS:
             continue
         if st.startswith("$EVENT:"):
             rec.event = st[7:].strip()
@@ -271,8 +326,17 @@ def parse_csa(text: str, source_name: str = "") -> GameRecord:
                 continue
             _attach_analysis(rec, pos, slot, eval_comments)
 
+    # '#WIN'/'#LOSE'/'#DRAW' を Your_Turn 側視点で RESULT_* に解決する。
+    hash_result: int | None = None
+    if hash_result_side == "draw":
+        hash_result = RESULT_DRAW
+    elif hash_result_side == "win":
+        hash_result = RESULT_BLACK if your_turn_side == BLACK else RESULT_WHITE
+    elif hash_result_side == "lose":
+        hash_result = RESULT_WHITE if your_turn_side == BLACK else RESULT_BLACK
+
     _finalize_result(rec, special, special_sign, summary_reason, summary_result,
-                     len(csa_moves), first_turn)
+                     len(csa_moves), first_turn, hash_reason, hash_result)
     if not rec.start_time and source_name:
         m = re.search(r"(\d{14})", Path(source_name).stem[::-1])
         if m:
@@ -392,7 +456,8 @@ def _apply_setup(pos, use_pi, removed, explicit_board, hand_lines,
 
 
 def _finalize_result(rec, special, sign, summary_reason, summary_result,
-                     n_moves, first_turn) -> None:
+                     n_moves, first_turn, hash_reason=None,
+                     hash_result=None) -> None:
     side_to_move = (first_turn + n_moves) % 2
 
     reason = ""
@@ -400,6 +465,8 @@ def _finalize_result(rec, special, sign, summary_reason, summary_result,
         reason = SPECIAL_TO_REASON.get(special, special.lower())
     elif summary_reason:
         reason = summary_reason
+    elif hash_reason:
+        reason = hash_reason
     rec.end_reason = reason
     rec.finished = bool(reason)
     if not rec.finished:
@@ -407,6 +474,12 @@ def _finalize_result(rec, special, sign, summary_reason, summary_result,
 
     if summary_result is not None:
         rec.result = summary_result
+        return
+    # サーバの '#WIN'/'#LOSE'/'#DRAW' は権威ある結果なのでパリティ推定より優先。
+    # (特にサーバ形式の反則負けは、反則手が指し手列に記録されずパリティが
+    #  逆になるため、明示結果を用いる必要がある)
+    if hash_result is not None:
+        rec.result = hash_result
         return
     if reason in DRAW_REASONS:
         rec.result = RESULT_DRAW

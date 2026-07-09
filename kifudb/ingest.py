@@ -21,7 +21,9 @@ _SOURCE_PATTERNS = [
     # wdoorサーバー上の対局はテスト対局室 (wdoor+test-... 等) も含めて
     # すべて floodgate 扱いにする (アーカイブとURL規則が同一のため)。
     (re.compile(r"^wdoor\+", re.I), "floodgate"),
-    (re.compile(r"^wcsc", re.I), "wcsc"),
+    # WCSC本戦(wcscNN)に加え、2020年オンライン開催のWCSO(=第30回)も
+    # WCSC系として扱う。
+    (re.compile(r"^wcs[co]", re.I), "wcsc"),
     (re.compile(r"^dr\d", re.I), "denryusen"),
 ]
 
@@ -43,7 +45,83 @@ def detect_source(event_or_name: str) -> str:
     for pattern, name in _SOURCE_PATTERNS:
         if pattern.search(event_or_name):
             return name
+    # 電竜戦には接頭辞が 'dr\d' でないもの (獅子王戦=shishio3、後援大会=donou3、
+    # 実験対局=drjikken 等) があるので、URL解決表で拾えれば denryusen とする。
+    from .query import _denryusen_tournament
+    if _denryusen_tournament(event_or_name):
+        return "denryusen"
     return "other"
+
+
+# WCSC/WCSO の event から「大会」と「回戦」を取り出す (日付復元用)。
+_WCSC_EDITION_RE = re.compile(r"^(WCS[CO]\d+)", re.I)
+_WCSC_ROUND_RE = re.compile(r"^WCS[CO]\d+[_+]([A-Za-z]+\d+)", re.I)
+
+
+def _wcsc_round_key(event: str) -> str | None:
+    m = _WCSC_ROUND_RE.match(event)
+    return m.group(1).upper() if m else None
+
+
+def _recover_wcsc_date(conn: sqlite3.Connection, event: str) -> str | None:
+    """時刻を持たない大会対局の「日付」を同大会の他対局から復元する。
+
+    完全にデータ駆動: 同じ棋譜集合を取り込めば誰でも同じ結果になる。
+    優先順位は 同大会・同回戦 → 同大会・同フェーズ(L*/F*等) → 同大会 の
+    最小日付。時刻は捏造せず、呼び出し側で 00:00:00 を付す。
+    """
+    m = _WCSC_EDITION_RE.match(event)
+    if not m:
+        return None
+    edition = m.group(1)
+    rows = conn.execute(
+        "SELECT event, started_at FROM games "
+        "WHERE source='wcsc' AND event LIKE ? "
+        "AND started_at IS NOT NULL AND started_at != ''",
+        (edition + "%",)).fetchall()
+    if not rows:
+        return None
+    round_key = _wcsc_round_key(event)
+    same_round = [sa[:10] for ev, sa in rows if round_key and _wcsc_round_key(ev) == round_key]
+    if same_round:
+        return min(same_round)
+    phase = round_key[0] if round_key else None
+    same_phase = [sa[:10] for ev, sa in rows
+                  if phase and (_wcsc_round_key(ev) or "")[:1] == phase]
+    if same_phase:
+        return min(same_phase)
+    return min(sa[:10] for _ev, sa in rows)
+
+
+def _backfill_missing_dates(conn: sqlite3.Connection) -> int:
+    """開始日時が無い大会対局に、復元した日付 + 00:00:00 を補う。
+
+    大会棋譜には稀に時刻情報を持たない対局がある (WCSCの一部予選リーグ等)。
+    日付不明のままだと sort_key=0 で時系列ソートの最古に沈むため、日付だけを
+    復元して他対局と正しい順序で並ぶようにする。時刻(00:00:00)は「不明」を表す
+    センチネルで、表示もしない。00:00:00 は date_sort_key と同じ規則で
+    position_games.sort_key にも反映する。"""
+    undated = conn.execute(
+        "SELECT game_id, event FROM games "
+        "WHERE source='wcsc' AND (started_at IS NULL OR started_at = '')"
+    ).fetchall()
+    fixed_ids = []
+    for game_id, event in undated:
+        date = _recover_wcsc_date(conn, event)
+        if not date:
+            continue
+        conn.execute("UPDATE games SET started_at = ? WHERE game_id = ?",
+                     (f"{date} 00:00:00", game_id))
+        fixed_ids.append(game_id)
+    if fixed_ids:
+        placeholders = ",".join("?" for _ in fixed_ids)
+        # sort_key は db.py の v2->v3 移行および date_sort_key と同一の式で再計算。
+        conn.execute(
+            f"UPDATE position_games SET sort_key = COALESCE("
+            f"  (SELECT CAST(strftime('%s', g.started_at) AS INTEGER) / 60 "
+            f"   FROM games g WHERE g.game_id = position_games.game_id), 0) "
+            f"WHERE game_id IN ({placeholders})", fixed_ids)
+    return len(fixed_ids)
 
 
 class IngestStats:
@@ -121,6 +199,10 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
             log.info("progress %d/%d (%s)", index, total, stats.summary())
 
     _refresh_stats(conn, touched_keys)
+    backfilled = _backfill_missing_dates(conn)
+    if backfilled:
+        log.info("recovered dates for %d undated tournament game(s) "
+                 "from sibling games", backfilled)
     conn.commit()
     conn.close()
     log.info("done in %.1fs: %s", time.time() - started, stats.summary())
@@ -178,10 +260,22 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
             (game_id, analysis.encode_evals(rec.evals),
              analysis.encode_pvs(pvs)))
 
+    # 電竜戦buoy等の「初期局面に戻る前置き手順(ハンドシェイク)」を索引から除外する。
+    # 例: 開始4手が玉の往復 (5i5h 5a5b 5h5i 5b5a) で平手に戻り、その後に実戦。
+    # 初期局面へ完全に戻るのは実質この種の無効手順だけなので、初期局面が
+    # 再出現する最後の ply までを前置きとみなし、そこから索引する。ply番号は
+    # 元のまま (moves 本体も完全保持) なのでビューアの手数アンカーはズレない。
+    keys = rec.sfen_keys
+    start_ply = 0
+    for ply in range(len(keys) - 1, 0, -1):
+        if keys[ply] == keys[0]:
+            start_ply = ply
+            break
     rows = []
     n_moves = len(rec.moves)
     sort_key = date_sort_key(rec.start_time)
-    for ply, position_key in enumerate(rec.sfen_keys):
+    for ply in range(start_ply, len(keys)):
+        position_key = keys[ply]
         next_move = rec.moves[ply] if ply < n_moves else 0
         rows.append((position_key, sort_key, game_id, ply, next_move))
         touched_keys.add(position_key)

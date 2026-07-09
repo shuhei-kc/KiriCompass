@@ -26,10 +26,85 @@ REASON_JA = {
 
 import re as _re
 
+# 電竜戦: event接頭辞 → ビューアURLの大会ID (フォルダ)。
+# 接頭辞は不規則で規則化できないもの (獅子王戦・後援大会・実験対局や、
+# production の別綴り prod/prd 等) は明示表で対応し、規則的なもの
+# (drNprd/drNprod/drNtsec/drNhdM/drNsakura) は _DENRYU_TOURNAMENT_RES で解決する。
+# 表は tools/download_denryusen.py が実ダウンロードから生成する
+# data/denryusen_prefix_map.txt を基にした (最頻フォルダを採用)。
+_DENRYU_PREFIX_MAP = {
+    "shishio3": "dr2_exhi2",     # 獅子王戦3
+    "dr2ex2": "dr2_exhi2",
+    "dr2long": "dr2_exhi1",      # 長時間エキシビション
+    "donou3": "dr4_patronage_do3",  # 後援大会
+    "drjikken": "dr4_sakura",    # 実験対局
+    "dr1t4": "dr1_production",
+    "dr1tsec1": "dr2_tsec",
+}
 _DENRYU_TOURNAMENT_RES = [
-    (_re.compile(r"^dr(\d+)prd$"), r"dr\1_production"),
-    (_re.compile(r"^dr(\d+)hd(\d+)$"), r"dr\1_hardware\2"),
+    (_re.compile(r"^dr(\d+)pro?d"), r"dr\1_production"),   # drNprd / drNprod
+    (_re.compile(r"^dr(\d+)tsec"), r"dr\1_tsec"),
+    (_re.compile(r"^dr(\d+)hd(\d+)"), r"dr\1_hardware\2"),
+    (_re.compile(r"^dr(\d+)sakura"), r"dr\1_sakura"),
 ]
+
+
+def _denryusen_tournament(event: str) -> str | None:
+    """電竜戦 event から大会ID (URLパス) を解決する。不明なら None。"""
+    prefix = event.split("+", 1)[0]
+    if prefix in _DENRYU_PREFIX_MAP:
+        return _DENRYU_PREFIX_MAP[prefix]
+    for pattern, replacement in _DENRYU_TOURNAMENT_RES:
+        if pattern.match(prefix):
+            return pattern.sub(replacement, prefix)
+    return None
+
+_WCSC_EVENT_RE = _re.compile(r"^(wcsc|wcso)(\d+)", _re.I)
+
+
+def _wcsc_tournament(event: str) -> tuple[str, int] | None:
+    """event先頭から (種別, 回次) を返す。種別は 'wcsc' か 'wcso'(オンライン)。
+
+    WCSO1 は2020年のオンライン開催 (実質 第30回) で、URLスラッグ・ファイル名
+    ともに 'wcso1' 系を使うため 'wcsc' とは別扱いにする。
+    """
+    m = _WCSC_EVENT_RE.match(event)
+    if m:
+        return m.group(1).lower(), int(m.group(2))
+    # WCSC28 決勝の一部 (F1〜F3) は配信ファイル名から回次番号が抜けており
+    # (例: WCSC_F1_APR_MCB)、この形式は当該大会にのみ存在する。番号を補う。
+    # URL側は event をそのまま /kifu/<event>.html に使うので改名は不要。
+    if _re.match(r"^wcsc_f\d", event, _re.I):
+        return "wcsc", 28
+    return None
+
+
+def _wcsc_url(event: str) -> str | None:
+    """WCSC/WCSO の棋譜ビューアURL。回次ごとに配信元・パスが異なる。
+
+    - 36回〜         : https://www.computer-shogi.org/live/wcscNN/html/<name>.html
+                       (name は '+' を '_' に置換したフル名)
+    - 33〜35回        : http://live4.computer-shogi.org/wcscNN/html/<event>.html
+                       (event はフル名 '+' 区切りのまま)
+    - 28〜32回        : http://live4.computer-shogi.org/wcscNN/kifu/<event>.html
+                       (event は配信元の短縮名 'WCSC32_F7_YAN_TNK_1' 等)
+    - WCSO1 (第30回)  : http://live4.computer-shogi.org/wcso1/kifu/<event>.html
+    - 27回以前        : 個別棋譜ページ無し (非対応)
+    """
+    t = _wcsc_tournament(event)
+    if t is None:
+        return None
+    kind, num = t
+    if kind == "wcso":
+        return f"http://live4.computer-shogi.org/wcso{num}/kifu/{event}.html"
+    if num >= 36:
+        return (f"https://www.computer-shogi.org/live/wcsc{num}"
+                f"/html/{event.replace('+', '_')}.html")
+    if num >= 33:
+        return f"http://live4.computer-shogi.org/wcsc{num}/html/{event}.html"
+    if num >= 28:
+        return f"http://live4.computer-shogi.org/wcsc{num}/kifu/{event}.html"
+    return None
 
 
 def game_url(source: str, event: str, started_at: str = "",
@@ -48,22 +123,13 @@ def game_url(source: str, event: str, started_at: str = "",
         date_dir = started_at[:10].replace("-", "/")
         return f"https://wdoor.c.u-tokyo.ac.jp/shogi/x/{date_dir}/{event}.html"
     if source == "denryusen":
-        prefix = event.split("+", 1)[0]
-        tournament = prefix
-        for pattern, replacement in _DENRYU_TOURNAMENT_RES:
-            if pattern.match(prefix):
-                tournament = pattern.sub(replacement, prefix)
-                break
+        tournament = _denryusen_tournament(event)
+        if tournament is None:
+            return None
         anchor = f"/{ply}" if ply else ""
         return f"https://denryu-sen.jp/denryusen/{tournament}/dist/#/{event}{anchor}"
-    if source == "wcsc" and "+" in event:
-        m = _re.match(r"^wcsc(\d+)", event, _re.I)
-        if m:
-            number = int(m.group(1))
-            host = "live4" if number >= 25 else "live2" if number >= 17 else None
-            if host:
-                return (f"http://{host}.computer-shogi.org/wcsc{number}"
-                        f"/html/{event}.html")
+    if source == "wcsc":
+        return _wcsc_url(event)
     return None
 
 
@@ -76,11 +142,13 @@ def tournament_label(source: str, event: str) -> str:
         return "floodgate"
     prefix = event.split("+", 1)[0]
     if source == "denryusen":
-        for pattern, replacement in _DENRYU_TOURNAMENT_RES:
-            if pattern.match(prefix):
-                return pattern.sub(replacement, prefix)
-        return prefix
+        return _denryusen_tournament(event) or prefix
     if source == "wcsc":
+        # 短縮名(WCSC32_F7_...)・WCSO1・フル名すべてから大会名を取り出す。
+        t = _wcsc_tournament(event)
+        if t:
+            kind, num = t
+            return f"WCSO{num}" if kind == "wcso" else f"WCSC{num}"
         return prefix
     return source
 
