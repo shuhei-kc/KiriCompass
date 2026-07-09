@@ -5,7 +5,8 @@
 
 - sfen欄には "position sfen ...", "sfen ...", "startpos", 素のsfen の
   いずれを貼り付けてもよい。手数部分は無視される。
-- 前例をダブルクリックすると棋譜URLをブラウザで開く。
+- 前例をダブルクリックすると、DBから棋譜(CSA)を復元してローカルの
+  既定アプリ (ShogiHome等) で開く。元の棋譜ファイルは不要。
 - 前例を選択すると、その局面での評価値と読み筋(記録があれば)を表示する。
 - 「ShogiHome連動」をONにすると、USIエンジン (tools/usi_engine.py) が
   書き出すsyncファイルを追従して自動検索する。単体利用時はOFFのまま。
@@ -24,6 +25,7 @@ from tkinter import filedialog, messagebox, ttk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kifudb.board import Position, normalize_sfen_main, usi_to_move16  # noqa: E402
+from kifudb.export import game_to_csa, safe_filename  # noqa: E402
 from kifudb.ki2 import format_pv_ki2, move16_to_ki2  # noqa: E402
 from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
                           PrecedentReader, REASON_JA, format_report,
@@ -376,13 +378,39 @@ class PrecedentViewer:
         else:
             lines.append("評価値・読み筋の記録なし")
         if p.url:
-            lines.append(f"URL: {p.url} (ダブルクリックで開く)")
+            lines.append(f"URL: {p.url}")
+        lines.append("(ダブルクリック: DBから棋譜を復元してローカルで開く)")
         self._set_detail("\n".join(lines))
 
     def _on_precedent_open(self, _event=None) -> None:
+        """ダブルクリック: DBから棋譜を復元してローカルの既定アプリで開く。"""
         p = self._selected_precedent()
-        if p is not None and p.url:
-            webbrowser.open(p.url)
+        if p is None:
+            return
+        try:
+            detail = self._get_reader(self.db_var.get().strip()).get_game(p.game_id)
+            if detail is None:
+                return
+            out_dir = RUNTIME_DIR / "exported"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"{safe_filename(detail.event)}.csa"
+            path.write_text(game_to_csa(detail), encoding="utf-8")
+            self._open_local_file(path)
+            self.status_var.set(f"棋譜を復元して開きました: {path.name}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("棋譜復元エラー", str(exc))
+
+    @staticmethod
+    def _open_local_file(path: Path) -> None:
+        if sys.platform == "win32":
+            import os
+            os.startfile(path)  # noqa: S606
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.Popen(["open", str(path)])
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", str(path)])
 
     def _selected_precedent(self):
         selection = self.prec_tv.selection()

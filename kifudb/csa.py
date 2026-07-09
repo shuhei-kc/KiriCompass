@@ -219,12 +219,17 @@ def parse_csa(text: str, source_name: str = "") -> GameRecord:
             if token and token[0] in "+-":
                 special_sign = token[0]
                 token = token[1:]
-            special = token
-            break  # nothing meaningful after the terminal statement
+            if special is None:
+                special = token
+            # break しない: 終局トークンの後にも 'summary: 行が来る
+            # (floodgate等)。勝敗はパリティ推定よりsummaryが正確。
+            continue
         if st.startswith("T"):
             continue
         m = _MOVE_RE.match(st)
         if m:
+            if special is not None:
+                continue  # 終局後の指し手行は無視
             if not setup_done:
                 raise CsaParseError("move before position setup / turn line")
             color = BLACK if m.group(1) == "+" else WHITE
@@ -242,14 +247,29 @@ def parse_csa(text: str, source_name: str = "") -> GameRecord:
         rec.evals = [None] * (len(csa_moves) + 1)
         rec.pvs = [[] for _ in range(len(csa_moves) + 1)]
         _attach_analysis(rec, pos, 0, eval_comments)
+    prev_pos = None
     for color, frm, to, ptype in csa_moves:
+        if has_analysis:
+            prev_pos = pos.copy()
         try:
             rec.moves.append(pos.push_csa(color, frm, to, ptype))
         except (ValueError, KeyError) as exc:
             raise CsaParseError(f"replay failed at ply {len(rec.moves) + 1}: {exc}") from exc
         rec.sfen_keys.append(pos.position_key())
         if has_analysis:
-            _attach_analysis(rec, pos, len(rec.moves), eval_comments)
+            slot = len(rec.moves)
+            entry = eval_comments.get(slot)
+            if entry is not None and _pv_starts_with(entry[1], rec.moves[-1]):
+                # 一部のエンジンは「自分の指し手の直後」に、その手を指す
+                # 前の局面の解析を書く (PVが直前の自手から始まるのが特徴。
+                # 直前に指された手をもう一度指すことは物理的に不可能なので
+                # 誤検出はない)。1スロット前の局面に付け替える。
+                if rec.evals[slot - 1] is None and not rec.pvs[slot - 1]:
+                    rec.evals[slot - 1] = entry[0]
+                    if entry[1]:
+                        rec.pvs[slot - 1] = parse_pv_tokens(entry[1], prev_pos)
+                continue
+            _attach_analysis(rec, pos, slot, eval_comments)
 
     _finalize_result(rec, special, special_sign, summary_reason, summary_result,
                      len(csa_moves), first_turn)
@@ -261,6 +281,26 @@ def parse_csa(text: str, source_name: str = "") -> GameRecord:
     if not rec.event and source_name:
         rec.event = Path(source_name).stem
     return rec
+
+
+def _pv_starts_with(pv_text: str, move_code: int) -> bool:
+    """True if the PV's first token denotes exactly `move_code`."""
+    from .board import usi_to_move16
+
+    tokens = pv_text.split()
+    if not tokens:
+        return False
+    token = tokens[0]
+    m = _CSA_PV_TOKEN_RE.match(token)
+    if m:
+        to_sq = _sq(m.group(3))
+        if m.group(2) == "00":
+            frm_field = 81 + CSA_PIECE.get(m.group(4), 99)
+        else:
+            frm_field = _sq(m.group(2))
+        return (move_code & 0x3FFF) == (to_sq | (frm_field << 7))
+    code = usi_to_move16(token)
+    return code is not None and (code & 0x3FFF) == (move_code & 0x3FFF)
 
 
 def _attach_analysis(rec: GameRecord, pos, slot: int, eval_comments: dict) -> None:
@@ -277,19 +317,19 @@ def parse_pv_tokens(pv_text: str, pos) -> list[int]:
 
     Tolerant by design: parsing stops at the first token that is neither a
     CSA nor a USI move (times, node counts, '%TORYO', free text, ...).
-    CSA tokens are replayed on a scratch board to resolve promotion flags;
-    inconsistent tails are truncated.
+    Both CSA and USI tokens are replayed on a scratch board; tails that do
+    not apply to the position are truncated. This keeps the stored PV
+    consistent with the position, so a kifu reconstructed from the database
+    reproduces exactly the same analysis data.
     """
-    from .board import usi_to_move16
+    from .board import apply_move16, usi_to_move16
 
     tokens = pv_text.split()
     moves: list[int] = []
-    scratch = None
+    scratch = pos.copy()
     for token in tokens:
         m = _CSA_PV_TOKEN_RE.match(token)
         if m:
-            if scratch is None:
-                scratch = pos.copy()
             color = BLACK if m.group(1) == "+" else WHITE
             frm = -1 if m.group(2) == "00" else _sq(m.group(2))
             try:
@@ -300,6 +340,10 @@ def parse_pv_tokens(pv_text: str, pos) -> list[int]:
             continue
         code = usi_to_move16(token)
         if code is not None:
+            try:
+                apply_move16(scratch, code)
+            except (ValueError, KeyError, TypeError):
+                break
             moves.append(code)
             continue
         break

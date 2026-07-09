@@ -85,4 +85,11 @@ def main() -> None:
 if __name__ == "__main__":
     # GUIから起動された際に確実に行バッファで動くようにする
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
+    # ShogiHome (Node readline) はUTF-8でエンジン出力を読むため、
+    # Windowsのcp932既定に引きずられないよう明示的にUTF-8へ固定する。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, OSError):
+            pass
     main()
