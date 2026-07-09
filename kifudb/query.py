@@ -197,6 +197,13 @@ class PrecedentReader:
                 "ORDER BY pg.sort_key DESC, pg.game_id DESC "
                 "LIMIT ?", params)]
 
+    def get_source_path(self, game_id: int) -> str | None:
+        """取り込み元の棋譜ファイルのパス (台帳に記録があれば)。"""
+        row = self.conn.execute(
+            "SELECT path FROM source_files WHERE game_id = ?",
+            (game_id,)).fetchone()
+        return row[0] if row else None
+
     def get_game(self, game_id: int) -> "GameDetail | None":
         row = self.conn.execute(
             "SELECT event, source, started_at, black_name, white_name, "

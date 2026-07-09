@@ -5,8 +5,11 @@
 
 - sfen欄には "position sfen ...", "sfen ...", "startpos", 素のsfen の
   いずれを貼り付けてもよい。手数部分は無視される。
-- 前例をダブルクリックすると、DBから棋譜(CSA)を復元してローカルの
-  既定アプリ (ShogiHome等) で開く。元の棋譜ファイルは不要。
+- 前例をダブルクリックすると棋譜をクリップボードにコピーする。
+  ShogiHomeの検討中のウィンドウに Ctrl+V (⌘V) でそのまま貼り付けられる
+  (ファイル関連付けで開くとShogiHomeは必ず新規ウィンドウになるため)。
+  元ファイルが残っていればその内容を、なければDBから復元した棋譜を使う。
+  「ファイルで開く」ボタンは従来通り既定アプリで開く (新規ウィンドウ)。
 - 前例を選択すると、その局面での評価値と読み筋(記録があれば)を表示する。
 - 「ShogiHome連動」をONにすると、USIエンジン (tools/usi_engine.py) が
   書き出すsyncファイルを追従して自動検索する。単体利用時はOFFのまま。
@@ -212,6 +215,10 @@ class PrecedentViewer:
                                         command=self._post_to_x,
                                         state=tk.DISABLED)
         self.post_x_button.pack(fill=tk.X, pady=(4, 0))
+        self.open_file_button = ttk.Button(detail_buttons, text="ファイルで開く",
+                                           command=self._open_kifu_file,
+                                           state=tk.DISABLED)
+        self.open_file_button.pack(fill=tk.X, pady=(4, 0))
         self.detail_text = tk.Text(detail_frame, height=5, wrap=tk.WORD,
                                    state=tk.DISABLED, font=self.mono_font)
         self.detail_text.pack(fill=tk.BOTH, expand=True)
@@ -361,6 +368,7 @@ class PrecedentViewer:
         button_state = tk.NORMAL if p.url else tk.DISABLED
         self.copy_url_button.config(state=button_state)
         self.post_x_button.config(state=button_state)
+        self.open_file_button.config(state=tk.NORMAL)
         lines = [f"{p.black_name} vs {p.white_name}  "
                  f"{p.started_at[:10].replace('-', '/')}  "
                  f"{RESULT_JA.get(p.result, '?')} ({REASON_JA.get(p.end_reason, p.end_reason)}) "
@@ -379,18 +387,57 @@ class PrecedentViewer:
             lines.append("評価値・読み筋の記録なし")
         if p.url:
             lines.append(f"URL: {p.url}")
-        lines.append("(ダブルクリック: DBから棋譜を復元してローカルで開く)")
+        lines.append("(ダブルクリック: 棋譜をコピー → ShogiHomeで Ctrl+V / ⌘V。"
+                     "元ファイルがあればその内容を使用)")
         self._set_detail("\n".join(lines))
 
+    def _kifu_text(self, game_id: int) -> tuple[str, str]:
+        """棋譜テキストを取得。元ファイルが残っていればそれを優先する
+        (消費時間やコメントなど情報が多いため)。なければDBから復元する。
+        戻り値: (テキスト, 出所の説明)"""
+        reader = self._get_reader(self.db_var.get().strip())
+        source = reader.get_source_path(game_id)
+        if source and Path(source).is_file():
+            raw = Path(source).read_bytes()
+            if source.lower().endswith((".kif", ".kifu")):
+                from kifudb.kif import decode_kif_bytes
+                return decode_kif_bytes(raw), f"元ファイル: {Path(source).name}"
+            from kifudb.csa import decode_bytes
+            return decode_bytes(raw), f"元ファイル: {Path(source).name}"
+        detail = reader.get_game(game_id)
+        return game_to_csa(detail), "DBから復元"
+
     def _on_precedent_open(self, _event=None) -> None:
-        """ダブルクリック: DBから棋譜を復元してローカルの既定アプリで開く。"""
+        """ダブルクリック: 棋譜をクリップボードへコピーする。
+
+        ShogiHomeは検討中のウィンドウに Ctrl+V (⌘V) で貼り付けられる。
+        ファイル関連付けで開くと必ず新しいウィンドウが立つため、
+        同じウィンドウで続けるにはこの方式が最短。"""
         p = self._selected_precedent()
         if p is None:
             return
         try:
-            detail = self._get_reader(self.db_var.get().strip()).get_game(p.game_id)
-            if detail is None:
+            text, origin = self._kifu_text(p.game_id)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.status_var.set(
+                f"棋譜をコピーしました ({origin})。ShogiHomeで Ctrl+V / ⌘V で開けます。")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("棋譜取得エラー", str(exc))
+
+    def _open_kifu_file(self) -> None:
+        """棋譜をファイルとして既定アプリで開く (新しいウィンドウになる)。"""
+        p = self._selected_precedent()
+        if p is None:
+            return
+        try:
+            reader = self._get_reader(self.db_var.get().strip())
+            source = reader.get_source_path(p.game_id)
+            if source and Path(source).is_file():
+                self._open_local_file(Path(source))
+                self.status_var.set(f"元ファイルを開きました: {Path(source).name}")
                 return
+            detail = reader.get_game(p.game_id)
             out_dir = RUNTIME_DIR / "exported"
             out_dir.mkdir(parents=True, exist_ok=True)
             path = out_dir / f"{safe_filename(detail.event)}.csa"
@@ -398,7 +445,7 @@ class PrecedentViewer:
             self._open_local_file(path)
             self.status_var.set(f"棋譜を復元して開きました: {path.name}")
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("棋譜復元エラー", str(exc))
+            messagebox.showerror("棋譜取得エラー", str(exc))
 
     @staticmethod
     def _open_local_file(path: Path) -> None:
