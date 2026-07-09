@@ -5,11 +5,12 @@
 
 - sfen欄には "position sfen ...", "sfen ...", "startpos", 素のsfen の
   いずれを貼り付けてもよい。手数部分は無視される。
-- 前例をダブルクリックすると棋譜をクリップボードにコピーする。
-  ShogiHomeの検討中のウィンドウに Ctrl+V (⌘V) でそのまま貼り付けられる
-  (ファイル関連付けで開くとShogiHomeは必ず新規ウィンドウになるため)。
-  元ファイルが残っていればその内容を、なければDBから復元した棋譜を使う。
-  「ファイルで開く」ボタンは従来通り既定アプリで開く (新規ウィンドウ)。
+- 前例をダブルクリックすると棋譜ビューアをブラウザで開く (URLが無い前例は
+  棋譜のクリップボードコピーにフォールバック)。
+  「棋譜コピー」ボタンは棋譜をクリップボードにコピーする。ShogiHomeの検討中
+  ウィンドウに Ctrl+V (⌘V) でそのまま貼り付けられる (元ファイルが残っていれば
+  その内容を、なければDBから復元した棋譜を使う)。
+  「ファイルで開く」ボタンは既定アプリで開く (新規ウィンドウ)。
 - 前例を選択すると、その局面での評価値と読み筋(記録があれば)を表示する。
 - 「ShogiHome連動」をONにすると、USIエンジン (tools/usi_engine.py) が
   書き出すsyncファイルを追従して自動検索する。単体利用時はOFFのまま。
@@ -20,7 +21,6 @@ import sys
 import threading
 import time
 import urllib.parse
-import webbrowser
 from pathlib import Path
 
 import tkinter as tk
@@ -421,7 +421,7 @@ class PrecedentViewer:
         if p is None:
             return
         if p.url:
-            webbrowser.open(p.url)
+            self._open_url(p.url)
             self.status_var.set(f"棋譜ビューアを開きました: {p.url}")
             return
         self._copy_kifu()
@@ -468,15 +468,24 @@ class PrecedentViewer:
 
     @staticmethod
     def _open_local_file(path: Path) -> None:
+        PrecedentViewer._open_via_os(str(path))
+
+    @staticmethod
+    def _open_url(url: str) -> None:
+        # webbrowser.open は macOS で 2 タブ開くことがあるため OS の open を直呼び。
+        PrecedentViewer._open_via_os(url)
+
+    @staticmethod
+    def _open_via_os(target: str) -> None:
         if sys.platform == "win32":
             import os
-            os.startfile(path)  # noqa: S606
+            os.startfile(target)  # noqa: S606
         elif sys.platform == "darwin":
             import subprocess
-            subprocess.Popen(["open", str(path)])
+            subprocess.Popen(["open", target])
         else:
             import subprocess
-            subprocess.Popen(["xdg-open", str(path)])
+            subprocess.Popen(["xdg-open", target])
 
     def _selected_precedent(self):
         selection = self.prec_tv.selection()
@@ -520,8 +529,8 @@ class PrecedentViewer:
                 f"post_template.txt を確認してください: {exc}\n"
                 f"使える変数: {', '.join('{' + k + '}' for k in context)}")
             return
-        webbrowser.open("https://x.com/intent/post?text="
-                        + urllib.parse.quote(text))
+        self._open_url("https://x.com/intent/post?text="
+                       + urllib.parse.quote(text))
 
     def _set_detail(self, text: str) -> None:
         self.detail_text.config(state=tk.NORMAL)
