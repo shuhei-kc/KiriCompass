@@ -48,9 +48,19 @@ _DENRYU_TOURNAMENT_RES = [
     (_re.compile(r"^dr(\d+)sakura"), r"dr\1_sakura"),
 ]
 
+# 大会を跨いで掲載された対局の例外。棋譜の実体が接頭辞の示す大会に無く
+# (dr2_tsec/kifufiles は404)、掲載先の大会ビューアでしか開けないもの。
+_DENRYU_EVENT_OVERRIDES = {
+    "dr2tsec+buoy_wakis1_t-1_27_suisho98_suisho99-300-2F"
+    "+suisho98+suisho99+20210720231132": "dr2_exhi1",
+}
+
 
 def _denryusen_tournament(event: str) -> str | None:
     """電竜戦 event から大会ID (URLパス) を解決する。不明なら None。"""
+    override = _DENRYU_EVENT_OVERRIDES.get(event)
+    if override:
+        return override
     prefix = event.split("+", 1)[0]
     if prefix in _DENRYU_PREFIX_MAP:
         return _DENRYU_PREFIX_MAP[prefix]
