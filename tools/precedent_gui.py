@@ -167,7 +167,8 @@ class PrecedentViewer:
         cand_holder = ttk.Frame(panes)
         cand_frame = ttk.LabelFrame(cand_holder, text="候補手")
         cand_frame.pack(side=tk.LEFT, fill=tk.Y)
-        cand_cols = ("no", "move", "count", "black", "white", "draw", "rate")
+        cand_cols = ("no", "move", "count", "black", "white", "draw", "rate",
+                     "confl")
         self.cand_tv = ttk.Treeview(cand_frame, columns=cand_cols,
                                     show="headings", height=6)
         for col, label, width, anchor in (
@@ -175,7 +176,7 @@ class PrecedentViewer:
                 ("move", "指し手", 96, tk.W),
                 ("count", "出現", 70, tk.E), ("black", "先手勝", 70, tk.E),
                 ("white", "後手勝", 70, tk.E), ("draw", "引分", 60, tk.E),
-                ("rate", "先手勝率", 80, tk.E)):
+                ("rate", "先手勝率", 80, tk.E), ("confl", "合流", 60, tk.E)):
             self.cand_tv.heading(col, text=label)
             self.cand_tv.column(col, width=width, anchor=anchor, stretch=False)
         # 列幅の合計にウィジェット自体を合わせ、左に詰める
@@ -183,9 +184,26 @@ class PrecedentViewer:
         panes.add(cand_holder, weight=1)
 
         prec_frame = ttk.LabelFrame(panes, text="前例")
+
+        # 出典フィルタ (表示のみ絞り込む。No. は絞り込み前の順位を保持)
+        filter_row = ttk.Frame(prec_frame)
+        filter_row.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 0))
+        ttk.Label(filter_row, text="出典:").pack(side=tk.LEFT)
+        self.source_filter_vars: dict[str, tk.BooleanVar] = {}
+        for key, label in (("floodgate", "floodgate"), ("wcsc", "WCSC"),
+                           ("denryusen", "電竜戦"), ("other", "その他")):
+            var = tk.BooleanVar(value=True)
+            self.source_filter_vars[key] = var
+            ttk.Checkbutton(filter_row, text=label, variable=var,
+                            command=self._apply_source_filter).pack(
+                side=tk.LEFT, padx=(6, 0))
+
+        tree_holder = ttk.Frame(prec_frame)
+        tree_holder.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         prec_cols = ("no", "date", "black", "white", "next", "result", "reason",
                      "plies", "source")
-        self.prec_tv = ttk.Treeview(prec_frame, columns=prec_cols, show="headings")
+        self.prec_tv = ttk.Treeview(tree_holder, columns=prec_cols,
+                                    show="headings")
         for col, label, width, anchor in (
                 ("no", "No.", 44, tk.E),
                 ("date", "対局日", 90, tk.W), ("black", "先手", 170, tk.W),
@@ -195,7 +213,7 @@ class PrecedentViewer:
             self.prec_tv.heading(col, text=label)
             self.prec_tv.column(col, width=width, anchor=anchor,
                                 stretch=col in ("black", "white"))
-        scroll = ttk.Scrollbar(prec_frame, orient=tk.VERTICAL,
+        scroll = ttk.Scrollbar(tree_holder, orient=tk.VERTICAL,
                                command=self.prec_tv.yview)
         self.prec_tv.configure(yscrollcommand=scroll.set)
         self.prec_tv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -282,10 +300,12 @@ class PrecedentViewer:
             position = Position()
             position.set_sfen(sfen_main)
             started = time.perf_counter()
-            candidates, precedents, total = self._get_reader(db_path).lookup(sfen)
+            reader = self._get_reader(db_path)
+            candidates, precedents, total = reader.lookup(sfen)
+            confluence = reader.confluence_counts(sfen, candidates)
             elapsed = (time.perf_counter() - started) * 1000
             self.root.after(0, self._show_results, position, candidates,
-                            precedents, total, elapsed)
+                            precedents, total, elapsed, confluence)
         except Exception as exc:  # noqa: BLE001 - surface everything to the user
             self.root.after(0, self._show_error, str(exc))
 
@@ -295,12 +315,14 @@ class PrecedentViewer:
         self.status_var.set("エラー")
         messagebox.showerror("検索エラー", message)
 
-    def _show_results(self, position, candidates, precedents, total, elapsed) -> None:
+    def _show_results(self, position, candidates, precedents, total, elapsed,
+                      confluence=None) -> None:
         self._search_running = False
         self.search_button.config(state=tk.NORMAL)
         self.query_position = position
         self.precedents = []
         self._total_games = total
+        confluence = confluence or {}
 
         self.cand_tv.delete(*self.cand_tv.get_children())
         for rank, c in enumerate(candidates, start=1):
@@ -310,9 +332,10 @@ class PrecedentViewer:
             # 引き分けは後手勝ち扱いで先手勝率を算出する
             decided = c.black_wins + c.white_wins + c.draws
             rate = f"{c.black_wins / decided * 100:.1f}%" if decided else "-"
+            merged = confluence.get(c.usi, 0)
             self.cand_tv.insert("", tk.END, values=(
                 rank, label, c.game_count, c.black_wins, c.white_wins,
-                c.draws, rate))
+                c.draws, rate, merged or ""))
 
         self.prec_tv.delete(*self.prec_tv.get_children())
         self._append_precedents(precedents)
@@ -322,20 +345,37 @@ class PrecedentViewer:
             f"前例 {total}局 / 候補手 {len(candidates)}種 / 表示 {len(self.precedents)}件 "
             f"({elapsed:.1f}ms)")
 
+    def _source_enabled(self, source: str) -> bool:
+        # DBに無い/未知の source は「その他」チェックに従う。
+        var = self.source_filter_vars.get(source) or self.source_filter_vars.get("other")
+        return var.get() if var else True
+
+    def _insert_prec_row(self, index: int, p) -> None:
+        """1件を表に挿入する。No. と iid は絞り込みに依らず元の順位を保つ。"""
+        code = usi_to_move16(p.next_move_usi) if p.next_move_usi else None
+        next_label = (move16_to_ki2(self.query_position, code)
+                      if code is not None else "(終局)")
+        self.prec_tv.insert("", tk.END, iid=str(index), values=(
+            index + 1, p.started_at[:10].replace("-", "/"),
+            p.black_name, p.white_name, next_label,
+            WINNER_JA.get(p.result, "-"),
+            REASON_JA.get(p.end_reason, p.end_reason),
+            p.ply_count, p.source))
+
+    def _apply_source_filter(self) -> None:
+        """出典チェックに合わせて表示を再構築する (No. は元の順位のまま)。"""
+        self.prec_tv.delete(*self.prec_tv.get_children())
+        for index, p in enumerate(self.precedents):
+            if self._source_enabled(p.source):
+                self._insert_prec_row(index, p)
+
     def _append_precedents(self, page) -> None:
         """Append one page of precedents to the table (used by search & 続き)."""
         start = len(self.precedents)
         for offset, p in enumerate(page):
             index = start + offset
-            code = usi_to_move16(p.next_move_usi) if p.next_move_usi else None
-            next_label = (move16_to_ki2(self.query_position, code)
-                          if code is not None else "(終局)")
-            self.prec_tv.insert("", tk.END, iid=str(index), values=(
-                index + 1, p.started_at[:10].replace("-", "/"),
-                p.black_name, p.white_name, next_label,
-                WINNER_JA.get(p.result, "-"),
-                REASON_JA.get(p.end_reason, p.end_reason),
-                p.ply_count, p.source))
+            if self._source_enabled(p.source):
+                self._insert_prec_row(index, p)
         self.precedents.extend(page)
         # ページが満杯 = まだ続きがある可能性が高い
         self.more_button.config(

@@ -236,6 +236,40 @@ class PrecedentReader:
         precedents = self.precedents_page(sfen, limit=max_precedents)
         return candidates, precedents, total_games
 
+    def confluence_counts(self, sfen: str, candidates) -> "dict[str, int]":
+        """各候補手を指した後の局面に「別手順で合流してくる」対局数。
+
+        戻り値: usi -> 合流数 = (その手を指した後の局面の総対局数)
+                            - (この局面からその手を直接指した対局数)。
+        勝率統計には含めない付加情報。候補手を1手適用するだけで求まるので
+        合法手生成は不要 (この局面で一度も指されていない手は対象外)。
+        """
+        from .board import Position, apply_move16, usi_to_move16
+        pos = Position()
+        pos.set_sfen(normalize_sfen_main(sfen))
+        out: dict[str, int] = {}
+        for c in candidates:
+            if not c.usi or c.usi == "(end)":
+                continue
+            code = usi_to_move16(c.usi)
+            if code is None:
+                continue
+            nxt = pos.copy()
+            try:
+                apply_move16(nxt, code)
+            except (ValueError, KeyError, TypeError):
+                continue
+            key = nxt.position_key()
+            total = self.conn.execute(
+                "SELECT SUM(game_count) FROM position_stats "
+                "WHERE position_key = ?", (key,)).fetchone()[0]
+            if total is None:  # 集計行が無い = その局面は単独対局 (合流なし)
+                total = self.conn.execute(
+                    "SELECT COUNT(*) FROM position_games "
+                    "WHERE position_key = ?", (key,)).fetchone()[0]
+            out[c.usi] = max(total - c.game_count, 0)
+        return out
+
     def precedents_page(self, sfen: str, limit: int = DEFAULT_PAGE_SIZE,
                         before: tuple[int, int] | None = None) -> "list[Precedent]":
         """One page of precedents, newest first.
