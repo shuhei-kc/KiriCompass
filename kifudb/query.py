@@ -237,12 +237,14 @@ class PrecedentReader:
         return candidates, precedents, total_games
 
     def confluence_counts(self, sfen: str, candidates) -> "dict[str, int]":
-        """各候補手を指した後の局面に「別手順で合流してくる」対局数。
+        """各候補手を指した後の局面に「別手順で合流してくる」出現数。
 
-        戻り値: usi -> 合流数 = (その手を指した後の局面の総対局数)
-                            - (この局面からその手を直接指した対局数)。
-        勝率統計には含めない付加情報。候補手を1手適用するだけで求まるので
-        合法手生成は不要 (この局面で一度も指されていない手は対象外)。
+        戻り値: usi -> 合流数 = (その手を指した後の局面の総出現数)
+                            - (この局面からその手を直接指した出現数)。
+        千日手等で同一対局が同じ局面を複数回通ると、その回数ぶん数える
+        (局面インデックスが (対局, 手数) 行単位のため)。「対局数」ではなく
+        出現ベースの参考値であり、勝率統計には含めない。候補手を1手適用する
+        だけで求まるので合法手生成は不要 (未出現の手は transposition_moves)。
         """
         from .board import Position, apply_move16, usi_to_move16
         pos = Position()

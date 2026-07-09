@@ -181,6 +181,10 @@ class PrecedentViewer:
             self.cand_tv.column(col, width=width, anchor=anchor, stretch=False)
         # 列幅の合計にウィジェット自体を合わせ、左に詰める
         self.cand_tv.pack(side=tk.LEFT, fill=tk.Y)
+        cand_scroll = ttk.Scrollbar(cand_frame, orient=tk.VERTICAL,
+                                    command=self.cand_tv.yview)
+        self.cand_tv.configure(yscrollcommand=cand_scroll.set)
+        cand_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         panes.add(cand_holder, weight=1)
 
         prec_frame = ttk.LabelFrame(panes, text="前例")
@@ -351,8 +355,8 @@ class PrecedentViewer:
 
         self._set_detail("前例を選択すると評価値・読み筋・URLを表示します。")
         self.status_var.set(
-            f"前例 {total}局 / 候補手 {len(candidates)}種 / 表示 {len(self.precedents)}件 "
-            f"({elapsed:.1f}ms)")
+            f"前例 {total}局 / 候補手 {len(candidates)}種 / "
+            f"{self._shown_count_text()} ({elapsed:.1f}ms)")
 
     def _source_enabled(self, source: str) -> bool:
         # DBに無い/未知の source は「その他」チェックに従う。
@@ -371,12 +375,22 @@ class PrecedentViewer:
             REASON_JA.get(p.end_reason, p.end_reason),
             p.ply_count, p.source))
 
+    def _shown_count_text(self) -> str:
+        """『表示 N件』(絞り込み中は取得済み件数も併記) の文字列。"""
+        shown = len(self.prec_tv.get_children())
+        loaded = len(self.precedents)
+        if shown == loaded:
+            return f"表示 {shown}件"
+        return f"表示 {shown}件 (絞り込み前 {loaded}件)"
+
     def _apply_source_filter(self) -> None:
         """出典チェックに合わせて表示を再構築する (No. は元の順位のまま)。"""
         self.prec_tv.delete(*self.prec_tv.get_children())
         for index, p in enumerate(self.precedents):
             if self._source_enabled(p.source):
                 self._insert_prec_row(index, p)
+        self.status_var.set(
+            f"前例 {self._total_games}局 / {self._shown_count_text()}")
 
     def _append_precedents(self, page) -> None:
         """Append one page of precedents to the table (used by search & 続き)."""
@@ -415,7 +429,7 @@ class PrecedentViewer:
         self._search_running = False
         self._append_precedents(page)
         self.status_var.set(
-            f"前例 {self._total_games}局 / 表示 {len(self.precedents)}件")
+            f"前例 {self._total_games}局 / {self._shown_count_text()}")
 
     def _on_precedent_select(self, _event=None) -> None:
         p = self._selected_precedent()
