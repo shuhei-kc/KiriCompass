@@ -237,6 +237,15 @@ class PrecedentReader:
             self._intervals_max_gid = max_gid
         return self._intervals
 
+    def set_source_intervals(self, intervals, max_gid) -> None:
+        """事前計算した島表を渡してキャッシュを温める。
+
+        compute_source_intervals() をバックグラウンドスレッドで走らせ、
+        結果をここに渡すと、最初の出典絞り込みで数秒待たずに済む。"""
+        if max_gid is not None:
+            self._intervals = intervals
+            self._intervals_max_gid = max_gid
+
     def _source_condition(self, sources: "set[str]") -> str:
         """有効出典の集合を pg.game_id の区間条件 (SQL断片) に変換する。"""
         intervals = self._source_intervals()
@@ -442,6 +451,46 @@ class PrecedentReader:
             detail.pvs_usi = [[move16_to_usi(m) for m in pv]
                               for pv in decode_pvs(analysis_row[1])]
         return detail
+
+
+def compute_source_intervals(db_path: str | Path, progress=None,
+                             batch: int = 50000):
+    """出典→game_id 連続区間 (島) を専用接続で計算する (バックグラウンド用)。
+
+    戻り値: (intervals, max_gid)。PrecedentReader.set_source_intervals に
+    渡してキャッシュを温める。読み取り専用の別接続で走るため、進行中も
+    検索など他の処理をブロックしない (WALの読み取り同士は競合しない)。
+    progress(done, total) を渡すとバッチごとに呼ばれる (total は概算)。
+    """
+    conn = open_read_only(db_path)
+    try:
+        max_gid = conn.execute("SELECT MAX(game_id) FROM games").fetchone()[0]
+        if max_gid is None:
+            return [], None
+        intervals: list[tuple[str, int, int]] = []
+        run_src, run_lo, run_hi = None, 0, 0
+        cursor = conn.execute(
+            "SELECT game_id, source FROM games ORDER BY game_id")
+        done = 0
+        while True:
+            rows = cursor.fetchmany(batch)
+            if not rows:
+                break
+            for gid, src in rows:
+                if src == run_src and gid == run_hi + 1:
+                    run_hi = gid
+                else:
+                    if run_src is not None:
+                        intervals.append((run_src, run_lo, run_hi))
+                    run_src, run_lo, run_hi = src, gid, gid
+            done += len(rows)
+            if progress:
+                progress(done, max_gid)
+        if run_src is not None:
+            intervals.append((run_src, run_lo, run_hi))
+        return intervals, max_gid
+    finally:
+        conn.close()
 
 
 def lookup(db_path: str | Path, sfen: str,

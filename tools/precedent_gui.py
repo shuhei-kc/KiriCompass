@@ -31,7 +31,8 @@ from kifudb.board import Position, normalize_sfen_main, usi_to_move16  # noqa: E
 from kifudb.export import game_to_csa, safe_filename  # noqa: E402
 from kifudb.ki2 import format_pv_ki2, move16_to_ki2  # noqa: E402
 from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
-                          PrecedentReader, REASON_JA, format_report,
+                          PrecedentReader, REASON_JA,
+                          compute_source_intervals, format_report,
                           tournament_label)
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR  # noqa: E402
 
@@ -111,6 +112,7 @@ class PrecedentViewer:
         self._search_running = False
         self._sync_file = DEFAULT_SYNC_FILE  # runtime/gui_config.json で上書き可
         self._reader: PrecedentReader | None = None
+        self._primed_dbs: set[str] = set()  # 島表を先読み済みのDBパス
 
         self._setup_fonts()
         self._build_widgets()
@@ -202,6 +204,10 @@ class PrecedentViewer:
             ttk.Checkbutton(filter_row, text=label, variable=var,
                             command=self._on_filter_toggle).pack(
                 side=tk.LEFT, padx=(6, 0))
+        # 島表 (出典→game_id区間) 先読みの進捗。完了後は消える。
+        self.filter_prep_var = tk.StringVar(value="")
+        ttk.Label(filter_row, textvariable=self.filter_prep_var,
+                  foreground="gray").pack(side=tk.RIGHT)
 
         tree_holder = ttk.Frame(prec_frame)
         tree_holder.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -365,6 +371,39 @@ class PrecedentViewer:
             f"前例 {total}局 / 候補手 {len(candidates)}種 / "
             f"表示 {len(self.precedents)}件 ({elapsed:.1f}ms)")
         self._refetch_if_filter_changed(sources)
+        self._prime_source_intervals()
+
+    def _prime_source_intervals(self) -> None:
+        """出典絞り込み用の島表をバックグラウンドで先読みする (DBごとに一度)。
+
+        専用の読み取り接続で走るため、検索など他の処理をブロックしない。
+        完了前にフィルタを切り替えた場合は、従来どおり検索スレッド側で
+        同期計算されるだけで、結果は同じ。"""
+        db_path = self.db_var.get().strip()
+        if not db_path or db_path in self._primed_dbs:
+            return
+        self._primed_dbs.add(db_path)
+
+        def progress(done, total):
+            pct = min(done * 100 // max(total, 1), 99)
+            self.root.after(0, self.filter_prep_var.set, f"絞り込み準備 {pct}%")
+
+        def task():
+            try:
+                intervals, max_gid = compute_source_intervals(
+                    db_path, progress)
+            except Exception:  # noqa: BLE001 - 先読み失敗は同期計算で賄える
+                intervals, max_gid = None, None
+
+            def install():
+                if (max_gid is not None and self._reader is not None
+                        and self._reader.db_path == db_path):
+                    self._reader.set_source_intervals(intervals, max_gid)
+                self.filter_prep_var.set("")
+
+            self.root.after(0, install)
+
+        threading.Thread(target=task, daemon=True).start()
 
     def _enabled_sources(self):
         """有効な出典キーの集合。全てONなら None (絞り込み無しの高速経路)。"""
