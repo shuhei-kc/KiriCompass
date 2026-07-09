@@ -99,29 +99,58 @@ def _backfill_missing_dates(conn: sqlite3.Connection) -> int:
     大会棋譜には稀に時刻情報を持たない対局がある (WCSCの一部予選リーグ等)。
     日付不明のままだと sort_key=0 で時系列ソートの最古に沈むため、日付だけを
     復元して他対局と正しい順序で並ぶようにする。時刻(00:00:00)は「不明」を表す
-    センチネルで、表示もしない。00:00:00 は date_sort_key と同じ規則で
-    position_games.sort_key にも反映する。"""
+    センチネルで、表示もしない。sort_key は date_sort_key と同じ規則で
+    position_games にも反映する。"""
     undated = conn.execute(
-        "SELECT game_id, event FROM games "
+        "SELECT game_id, event, initial_sfen, moves FROM games "
         "WHERE source='wcsc' AND (started_at IS NULL OR started_at = '')"
     ).fetchall()
-    fixed_ids = []
-    for game_id, event in undated:
+    fixed = 0
+    for game_id, event, initial_sfen, moves_blob in undated:
         date = _recover_wcsc_date(conn, event)
         if not date:
             continue
+        started_at = f"{date} 00:00:00"
         conn.execute("UPDATE games SET started_at = ? WHERE game_id = ?",
-                     (f"{date} 00:00:00", game_id))
-        fixed_ids.append(game_id)
-    if fixed_ids:
-        placeholders = ",".join("?" for _ in fixed_ids)
-        # sort_key は db.py の v2->v3 移行および date_sort_key と同一の式で再計算。
-        conn.execute(
-            f"UPDATE position_games SET sort_key = COALESCE("
-            f"  (SELECT CAST(strftime('%s', g.started_at) AS INTEGER) / 60 "
-            f"   FROM games g WHERE g.game_id = position_games.game_id), 0) "
-            f"WHERE game_id IN ({placeholders})", fixed_ids)
-    return len(fixed_ids)
+                     (started_at, game_id))
+        _update_game_sort_keys(conn, game_id, initial_sfen, moves_blob,
+                               date_sort_key(started_at))
+        fixed += 1
+    return fixed
+
+
+def _update_game_sort_keys(conn: sqlite3.Connection, game_id: int,
+                           initial_sfen: str | None, moves_blob: bytes,
+                           sort_key: int) -> None:
+    """1対局分の position_games.sort_key を主キー参照だけで更新する。
+
+    position_games には game_id 単独の索引が無く、game_id 条件だけの UPDATE は
+    全表スキャンになる (統合DBでは1億行超で数分かかる)。対局の指し手を再生して
+    各手数の position_key を復元し、完全な主キー (position_key, 旧sort_key=0,
+    game_id, ply) で1行ずつ狙い撃ちする。索引から除外された手数 (ハンドシェイク
+    等) の行は存在せず、0行更新になるだけで無害。"""
+    from .board import Position, apply_move16
+    pos = Position()
+    try:
+        if initial_sfen:
+            pos.set_sfen(initial_sfen)
+        else:
+            pos.set_hirate()
+        keys = [pos.position_key()]
+        moves = array.array("H")
+        moves.frombytes(moves_blob)
+        for code in moves:
+            apply_move16(pos, code)
+            keys.append(pos.position_key())
+    except (ValueError, KeyError, TypeError) as exc:
+        # 再生に失敗しても取り込み全体は止めない (sort_key=0 のまま残る)。
+        log.warning("sort_key backfill: replay failed for game %d: %s",
+                    game_id, exc)
+        return
+    conn.executemany(
+        "UPDATE position_games SET sort_key = ? "
+        "WHERE position_key = ? AND sort_key = 0 AND game_id = ? AND ply = ?",
+        [(sort_key, key, game_id, ply) for ply, key in enumerate(keys)])
 
 
 class IngestStats:
