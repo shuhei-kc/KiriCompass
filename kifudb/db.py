@@ -11,6 +11,7 @@ Design goals:
 from __future__ import annotations
 
 import sqlite3
+import time as _time
 from pathlib import Path
 
 SCHEMA_VERSION = 3
@@ -118,8 +119,12 @@ def _migrate_if_needed(conn: sqlite3.Connection) -> None:
     version = int(row[0])
     if version == 2:
         log.info("migrating schema v2 -> v3 (rebuilding position index "
-                 "with date sort key; this can take a while)...")
-        conn.executescript("""
+                 "with date sort key)...")
+        started = _time.time()
+        # 中断された前回の移行の残骸があれば片付ける (再実行を安全にする)
+        conn.execute("DROP TABLE IF EXISTS position_games_v3")
+        conn.commit()
+        conn.execute("""
             CREATE TABLE position_games_v3 (
                 position_key INTEGER NOT NULL,
                 sort_key     INTEGER NOT NULL,
@@ -127,20 +132,28 @@ def _migrate_if_needed(conn: sqlite3.Connection) -> None:
                 ply          INTEGER NOT NULL,
                 next_move    INTEGER NOT NULL,
                 PRIMARY KEY (position_key, sort_key, game_id, ply)
-            ) WITHOUT ROWID;
+            ) WITHOUT ROWID""")
+        total = conn.execute("SELECT COUNT(*) FROM position_games").fetchone()[0]
+        log.info("phase 1/3: sorting and inserting %d rows "
+                 "(watch the -wal file grow)...", total)
+        # INSERT〜メタ更新までは1トランザクション: どこで中断しても
+        # ロールバックされ、DBはv2のまま無傷で残る。
+        conn.execute("""
             INSERT INTO position_games_v3
                 SELECT pg.position_key,
                        COALESCE(CAST(strftime('%s', g.started_at) AS INTEGER) / 60, 0),
                        pg.game_id, pg.ply, pg.next_move
                 FROM position_games pg JOIN games g USING (game_id)
-                ORDER BY 1, 2, 3, 4;
-            DROP TABLE position_games;
-            ALTER TABLE position_games_v3 RENAME TO position_games;
-            UPDATE meta SET value='3' WHERE key='schema_version';
-        """)
+                ORDER BY 1, 2, 3, 4""")
+        log.info("phase 2/3: swapping tables...")
+        conn.execute("DROP TABLE position_games")
+        conn.execute("ALTER TABLE position_games_v3 RENAME TO position_games")
+        conn.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
         conn.commit()
+        log.info("phase 3/3: VACUUM (reclaiming disk space; safe to "
+                 "interrupt, the database is already migrated)...")
         conn.execute("VACUUM")
-        log.info("migration to v3 complete")
+        log.info("migration to v3 complete in %.0fs", _time.time() - started)
     else:
         raise RuntimeError(
             f"unsupported schema version {version}; rebuild the database")
