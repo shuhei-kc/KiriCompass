@@ -22,22 +22,36 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR, PrecedentUsiEngine  # noqa: E402
 
-DEFAULT_LAUNCHER = RUNTIME_DIR / "kifudb_engine.command"
+IS_WINDOWS = sys.platform == "win32"
+DEFAULT_LAUNCHER = RUNTIME_DIR / (
+    "kifudb_engine.bat" if IS_WINDOWS else "kifudb_engine.command")
 
 
 def make_launcher(target: Path, args: argparse.Namespace) -> None:
+    """OSに合わせたエンジン起動スクリプトを生成する。
+
+    Windows: .bat (ShogiHomeは .bat/.cmd を cmd.exe /c で起動する)
+    macOS/Linux: シェルスクリプト (.command は Finder からも実行可能)
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     script_path = Path(__file__).resolve()
-    lines = [
-        "#!/bin/sh",
-        f'exec "{sys.executable}" -u "{script_path}"'
+    common_args = (
         f' --db "{Path(args.db).resolve()}"'
         f' --sync-file "{Path(args.sync_file).resolve()}"'
         f" --multipv {args.multipv} --pv-depth {args.pv_depth}"
-        + (f' --log "{Path(args.log).resolve()}"' if args.log else ""),
-    ]
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        + (f' --log "{Path(args.log).resolve()}"' if args.log else ""))
+    if IS_WINDOWS:
+        content = (f'@echo off\r\n'
+                   f'"{sys.executable}" -u "{script_path}"{common_args}\r\n')
+        # cmd.exe はバッチをANSI/OEMコードページで解釈するため、
+        # 日本語を含むパスに備えて mbcs (日本語環境では cp932) で書く。
+        target.write_text(content, encoding="mbcs", errors="replace")
+    else:
+        content = (f'#!/bin/sh\n'
+                   f'exec "{sys.executable}" -u "{script_path}"{common_args}\n')
+        target.write_text(content, encoding="utf-8")
+        target.chmod(target.stat().st_mode
+                     | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"ラッパースクリプトを作成しました: {target}")
     print("ShogiHomeの「エンジン追加」でこのファイルを選択してください。")
 
