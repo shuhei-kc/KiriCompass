@@ -190,7 +190,7 @@ class PrecedentViewer:
         prec_frame = ttk.LabelFrame(panes, text="前例")
 
         # 出典フィルタ。切り替えるとDBから絞り込み条件付きで1ページ取り直す
-        # (ロード済み分の表示切替ではない)。No. は絞り込み無しでの全体順位。
+        # (ロード済み分の表示切替ではない)。No. は現在の条件での新しい順の順位。
         filter_row = ttk.Frame(prec_frame)
         filter_row.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 0))
         ttk.Label(filter_row, text="出典:").pack(side=tk.LEFT)
@@ -421,8 +421,8 @@ class PrecedentViewer:
         self._refetch_if_filter_changed(sources_used)
 
     def _insert_prec_row(self, index: int, p) -> None:
-        """1件を表に挿入する。iid は self.precedents 内の添字、No. は
-        絞り込み無しの並びでの全体順位 (p.rank) で、絞り込んでも変わらない。"""
+        """1件を表に挿入する。iid は self.precedents 内の添字、No. (p.rank)
+        は現在の絞り込み条件での新しい順の順位。"""
         code = usi_to_move16(p.next_move_usi) if p.next_move_usi else None
         next_label = (move16_to_ki2(self.query_position, code)
                       if code is not None else "(終局)")
