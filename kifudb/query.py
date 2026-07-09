@@ -13,6 +13,9 @@ from .db import open_read_only
 # 前例一覧の1ページあたりの件数 (GUI・CLI・APIのデフォルトを一元管理)
 DEFAULT_PAGE_SIZE = 1000
 
+# DBに現れる既知の出典。これ以外は絞り込みで「その他」に分類される。
+KNOWN_SOURCES = ("floodgate", "wcsc", "denryusen")
+
 REASON_JA = {
     "toryo": "投了", "time_up": "時間切れ", "illegal_move": "反則負け",
     "illegal_action": "反則行為", "sennichite": "千日手",
@@ -192,6 +195,7 @@ class Precedent:
     ply: int
     ply_count: int
     sort_key: int = 0           # keyset pagination cursor (see precedents_page)
+    rank: int = 0               # 新しい順の全体通し番号 (出典絞り込みでも不変)
 
     @property
     def url(self) -> str | None:
@@ -319,7 +323,9 @@ class PrecedentReader:
         return out
 
     def precedents_page(self, sfen: str, limit: int = DEFAULT_PAGE_SIZE,
-                        before: tuple[int, int] | None = None) -> "list[Precedent]":
+                        before: tuple[int, int] | None = None,
+                        sources: "set[str] | None" = None,
+                        start_rank: int = 0) -> "list[Precedent]":
         """One page of precedents, newest first.
 
         The date lives inside the position_games primary key, so this is a
@@ -329,6 +335,14 @@ class PrecedentReader:
 
         `before` = (sort_key, game_id) of the last row already shown
         (keyset pagination; both values are on the returned Precedent).
+
+        `sources`: None で全出典 (高速なLIMITクエリ)。集合を渡すと出典で
+        絞り込む — その場合は新しい順に走査しながら全体通し番号 (rank) を
+        振り、一致行だけを limit 件まで集めるストリーミング走査になる。
+        rank は絞り込み無しの並びでの順位そのものなので、絞り込んでも No. が
+        変わらない。レアな出典では深くまで走査するぶん時間がかかる (前例100万
+        局の局面で全走査しても数秒程度)。`start_rank` は続き取得時に前ページ
+        最終行の rank を渡す。
         """
         key = position_key_from_sfen(normalize_sfen_main(sfen))
         condition, params = "", [key]
@@ -336,22 +350,48 @@ class PrecedentReader:
             condition = ("AND (pg.sort_key < ? OR "
                          "(pg.sort_key = ? AND pg.game_id < ?))")
             params += [before[0], before[0], before[1]]
-        params.append(limit)
-        return [
-            Precedent(game_id=r[0], event=r[1], source=r[2], started_at=r[3] or "",
-                      black_name=r[4], white_name=r[5],
-                      next_move_usi=move16_to_usi(r[6]) if r[6] else "",
-                      result=r[7], end_reason=r[8], ply=r[9], ply_count=r[10],
-                      sort_key=r[11])
-            for r in self.conn.execute(
-                "SELECT g.game_id, g.event, g.source, g.started_at, "
-                "       g.black_name, g.white_name, pg.next_move, "
-                "       g.result, g.end_reason, pg.ply, g.ply_count, "
-                "       pg.sort_key "
-                "FROM position_games pg JOIN games g USING (game_id) "
-                f"WHERE pg.position_key = ? {condition} "
-                "ORDER BY pg.sort_key DESC, pg.game_id DESC "
-                "LIMIT ?", params)]
+        base_sql = (
+            "SELECT g.game_id, g.event, g.source, g.started_at, "
+            "       g.black_name, g.white_name, pg.next_move, "
+            "       g.result, g.end_reason, pg.ply, g.ply_count, "
+            "       pg.sort_key "
+            "FROM position_games pg JOIN games g USING (game_id) "
+            f"WHERE pg.position_key = ? {condition} "
+            "ORDER BY pg.sort_key DESC, pg.game_id DESC ")
+
+        def to_precedent(r, rank):
+            return Precedent(
+                game_id=r[0], event=r[1], source=r[2], started_at=r[3] or "",
+                black_name=r[4], white_name=r[5],
+                next_move_usi=move16_to_usi(r[6]) if r[6] else "",
+                result=r[7], end_reason=r[8], ply=r[9], ply_count=r[10],
+                sort_key=r[11], rank=rank)
+
+        if sources is None:
+            rows = self.conn.execute(base_sql + "LIMIT ?", params + [limit])
+            return [to_precedent(r, start_rank + i + 1)
+                    for i, r in enumerate(rows)]
+
+        allow_other = "other" in sources
+        cursor = self.conn.execute(base_sql, params)
+        out: list[Precedent] = []
+        rank = start_rank
+        try:
+            while True:
+                chunk = cursor.fetchmany(4096)
+                if not chunk:
+                    break
+                for r in chunk:
+                    rank += 1
+                    src = r[2]
+                    if src in sources or (allow_other
+                                          and src not in KNOWN_SOURCES):
+                        out.append(to_precedent(r, rank))
+                        if len(out) >= limit:
+                            return out
+        finally:
+            cursor.close()
+        return out
 
     def get_source_path(self, game_id: int) -> str | None:
         """取り込み元の棋譜ファイルのパス (台帳に記録があれば)。"""

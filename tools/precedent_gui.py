@@ -189,7 +189,8 @@ class PrecedentViewer:
 
         prec_frame = ttk.LabelFrame(panes, text="前例")
 
-        # 出典フィルタ (表示のみ絞り込む。No. は絞り込み前の順位を保持)
+        # 出典フィルタ。切り替えるとDBから絞り込み条件付きで1ページ取り直す
+        # (ロード済み分の表示切替ではない)。No. は絞り込み無しでの全体順位。
         filter_row = ttk.Frame(prec_frame)
         filter_row.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 0))
         ttk.Label(filter_row, text="出典:").pack(side=tk.LEFT)
@@ -199,7 +200,7 @@ class PrecedentViewer:
             var = tk.BooleanVar(value=True)
             self.source_filter_vars[key] = var
             ttk.Checkbutton(filter_row, text=label, variable=var,
-                            command=self._apply_source_filter).pack(
+                            command=self._on_filter_toggle).pack(
                 side=tk.LEFT, padx=(6, 0))
 
         tree_holder = ttk.Frame(prec_frame)
@@ -295,23 +296,28 @@ class PrecedentViewer:
         self._search_running = True
         self.search_button.config(state=tk.DISABLED)
         self.status_var.set("検索中...")
+        # フィルタ状態は tk 変数なのでメインスレッドで読み取って渡す
         threading.Thread(target=self._search_task,
-                         args=(db_path, sfen), daemon=True).start()
+                         args=(db_path, sfen, self._enabled_sources()),
+                         daemon=True).start()
 
-    def _search_task(self, db_path: str, sfen: str) -> None:
+    def _search_task(self, db_path: str, sfen: str, sources) -> None:
         try:
             sfen_main = normalize_sfen_main(sfen)
             position = Position()
             position.set_sfen(sfen_main)
             started = time.perf_counter()
             reader = self._get_reader(db_path)
-            candidates, precedents, total = reader.lookup(sfen)
+            # 候補手統計は常に全出典。前例一覧だけ出典フィルタを適用する。
+            candidates, _, total = reader.lookup(sfen, max_precedents=0)
+            precedents = reader.precedents_page(sfen, limit=PAGE_SIZE,
+                                                sources=sources)
             confluence = reader.confluence_counts(sfen, candidates)
             transpositions = reader.transposition_moves(sfen, candidates)
             elapsed = (time.perf_counter() - started) * 1000
             self.root.after(0, self._show_results, position, candidates,
                             precedents, total, elapsed, confluence,
-                            transpositions)
+                            transpositions, sources)
         except Exception as exc:  # noqa: BLE001 - surface everything to the user
             self.root.after(0, self._show_error, str(exc))
 
@@ -322,7 +328,8 @@ class PrecedentViewer:
         messagebox.showerror("検索エラー", message)
 
     def _show_results(self, position, candidates, precedents, total, elapsed,
-                      confluence=None, transpositions=None) -> None:
+                      confluence=None, transpositions=None,
+                      sources=None) -> None:
         self._search_running = False
         self.search_button.config(state=tk.NORMAL)
         self.query_position = position
@@ -356,49 +363,81 @@ class PrecedentViewer:
         self._set_detail("前例を選択すると評価値・読み筋・URLを表示します。")
         self.status_var.set(
             f"前例 {total}局 / 候補手 {len(candidates)}種 / "
-            f"{self._shown_count_text()} ({elapsed:.1f}ms)")
+            f"表示 {len(self.precedents)}件 ({elapsed:.1f}ms)")
+        self._refetch_if_filter_changed(sources)
 
-    def _source_enabled(self, source: str) -> bool:
-        # DBに無い/未知の source は「その他」チェックに従う。
-        var = self.source_filter_vars.get(source) or self.source_filter_vars.get("other")
-        return var.get() if var else True
+    def _enabled_sources(self):
+        """有効な出典キーの集合。全てONなら None (絞り込み無しの高速経路)。"""
+        enabled = frozenset(k for k, v in self.source_filter_vars.items()
+                            if v.get())
+        return None if len(enabled) == len(self.source_filter_vars) else enabled
+
+    def _on_filter_toggle(self) -> None:
+        """出典チェック変更: 現在の局面をフィルタ条件付きで取り直す。
+
+        取得中の変更は、完了時の _refetch_if_filter_changed が拾い直す。"""
+        if self.query_position is None or self._search_running:
+            return
+        self._refetch_precedents()
+
+    def _refetch_if_filter_changed(self, sources_used) -> None:
+        """取得中にチェックが変わっていたら現在の状態で取り直す。"""
+        if self.query_position is not None and \
+                self._enabled_sources() != sources_used:
+            self._refetch_precedents()
+
+    def _refetch_precedents(self) -> None:
+        db_path = self.db_var.get().strip()
+        sfen = self.sfen_var.get().strip()
+        if not db_path or not sfen:
+            return
+        sources = self._enabled_sources()
+        self._search_running = True
+        self.search_button.config(state=tk.DISABLED)
+        self.more_button.config(state=tk.DISABLED)
+        self.status_var.set("絞り込みを反映中...")
+
+        def task():
+            try:
+                started = time.perf_counter()
+                page = self._get_reader(db_path).precedents_page(
+                    sfen, limit=PAGE_SIZE, sources=sources)
+                elapsed = (time.perf_counter() - started) * 1000
+                self.root.after(0, self._show_refetch, page, sources, elapsed)
+            except Exception as exc:  # noqa: BLE001
+                self.root.after(0, self._show_error, str(exc))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _show_refetch(self, page, sources_used, elapsed) -> None:
+        self._search_running = False
+        self.search_button.config(state=tk.NORMAL)
+        self.precedents = []
+        self.prec_tv.delete(*self.prec_tv.get_children())
+        self._append_precedents(page)
+        self.status_var.set(
+            f"前例 {self._total_games}局 / 表示 {len(self.precedents)}件 "
+            f"({elapsed:.0f}ms)")
+        self._refetch_if_filter_changed(sources_used)
 
     def _insert_prec_row(self, index: int, p) -> None:
-        """1件を表に挿入する。No. と iid は絞り込みに依らず元の順位を保つ。"""
+        """1件を表に挿入する。iid は self.precedents 内の添字、No. は
+        絞り込み無しの並びでの全体順位 (p.rank) で、絞り込んでも変わらない。"""
         code = usi_to_move16(p.next_move_usi) if p.next_move_usi else None
         next_label = (move16_to_ki2(self.query_position, code)
                       if code is not None else "(終局)")
         self.prec_tv.insert("", tk.END, iid=str(index), values=(
-            index + 1, p.started_at[:10].replace("-", "/"),
+            p.rank, p.started_at[:10].replace("-", "/"),
             p.black_name, p.white_name, next_label,
             WINNER_JA.get(p.result, "-"),
             REASON_JA.get(p.end_reason, p.end_reason),
             p.ply_count, p.source))
 
-    def _shown_count_text(self) -> str:
-        """『表示 N件』(絞り込み中は取得済み件数も併記) の文字列。"""
-        shown = len(self.prec_tv.get_children())
-        loaded = len(self.precedents)
-        if shown == loaded:
-            return f"表示 {shown}件"
-        return f"表示 {shown}件 (絞り込み前 {loaded}件)"
-
-    def _apply_source_filter(self) -> None:
-        """出典チェックに合わせて表示を再構築する (No. は元の順位のまま)。"""
-        self.prec_tv.delete(*self.prec_tv.get_children())
-        for index, p in enumerate(self.precedents):
-            if self._source_enabled(p.source):
-                self._insert_prec_row(index, p)
-        self.status_var.set(
-            f"前例 {self._total_games}局 / {self._shown_count_text()}")
-
     def _append_precedents(self, page) -> None:
         """Append one page of precedents to the table (used by search & 続き)."""
         start = len(self.precedents)
         for offset, p in enumerate(page):
-            index = start + offset
-            if self._source_enabled(p.source):
-                self._insert_prec_row(index, p)
+            self._insert_prec_row(start + offset, p)
         self.precedents.extend(page)
         # ページが満杯 = まだ続きがある可能性が高い
         self.more_button.config(
@@ -409,8 +448,10 @@ class PrecedentViewer:
             return
         last = self.precedents[-1]
         before = (last.sort_key, last.game_id)
+        start_rank = last.rank
         db_path = self.db_var.get().strip()
         sfen = self.sfen_var.get().strip()
+        sources = self._enabled_sources()
         self._search_running = True
         self.more_button.config(state=tk.DISABLED)
         self.status_var.set("続きを取得中...")
@@ -418,18 +459,20 @@ class PrecedentViewer:
         def task():
             try:
                 page = self._get_reader(db_path).precedents_page(
-                    sfen, limit=PAGE_SIZE, before=before)
-                self.root.after(0, self._show_more, page)
+                    sfen, limit=PAGE_SIZE, before=before,
+                    sources=sources, start_rank=start_rank)
+                self.root.after(0, self._show_more, page, sources)
             except Exception as exc:  # noqa: BLE001
                 self.root.after(0, self._show_error, str(exc))
 
         threading.Thread(target=task, daemon=True).start()
 
-    def _show_more(self, page) -> None:
+    def _show_more(self, page, sources_used=None) -> None:
         self._search_running = False
         self._append_precedents(page)
         self.status_var.set(
-            f"前例 {self._total_games}局 / {self._shown_count_text()}")
+            f"前例 {self._total_games}局 / 表示 {len(self.precedents)}件")
+        self._refetch_if_filter_changed(sources_used)
 
     def _on_precedent_select(self, _event=None) -> None:
         p = self._selected_precedent()
