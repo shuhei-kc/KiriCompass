@@ -231,12 +231,15 @@ class PrecedentViewer:
         bottom = ttk.Frame(self.root, padding=(8, 0, 8, 8))
         bottom.pack(fill=tk.X)
         self.status_var = tk.StringVar(value="DBとsfenを指定して検索してください。")
-        ttk.Label(bottom, textvariable=self.status_var).pack(side=tk.LEFT)
+        # 右のボタン類を先に確保し、ステータスは残り幅に収めて切り詰める
+        # (長いメッセージでもボタンを画面外へ押し出さないようにする)。
         ttk.Button(bottom, text="レポート保存...",
                    command=self._save_report).pack(side=tk.RIGHT)
         self.more_button = ttk.Button(bottom, text=f"さらに{PAGE_SIZE}件表示",
                                       command=self._load_more, state=tk.DISABLED)
         self.more_button.pack(side=tk.RIGHT, padx=6)
+        ttk.Label(bottom, textvariable=self.status_var, anchor=tk.W).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
 
     # -- actions ---------------------------------------------------------
 
@@ -422,7 +425,7 @@ class PrecedentViewer:
             return
         if p.url:
             self._open_url(p.url)
-            self.status_var.set(f"棋譜ビューアを開きました: {p.url}")
+            self.status_var.set("棋譜ビューアをブラウザで開きました。")
             return
         self._copy_kifu()
 
