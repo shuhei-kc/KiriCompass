@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import array
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -215,11 +216,16 @@ class PrecedentReader:
     the connection open preserves SQLite's page cache and the mmap window,
     which avoids sporadic slow lookups from cold reads — noticeable when
     the database lives on an external drive.
+
+    Thread-safe: one instance may be shared across threads (the GUI queries
+    from worker threads and the main thread). An RLock serializes all use
+    of the underlying connection.
     """
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = str(db_path)
         self.conn = open_read_only(db_path)
+        self._lock = threading.RLock()
         self._intervals: "list[tuple[str, int, int]] | None" = None
         self._intervals_max_gid: int | None = None
 
@@ -231,25 +237,27 @@ class PrecedentReader:
         まとまる (島の数は取り込みバッチ数程度)。この区間表を使うと出典の
         絞り込みを position_games の主キー列 (game_id) だけで判定でき、
         games への結合なしの索引走査になる。"""
-        max_gid = self.conn.execute(
-            "SELECT MAX(game_id) FROM games").fetchone()[0]
-        if self._intervals is None or self._intervals_max_gid != max_gid:
-            self._intervals = self.conn.execute(
-                "SELECT source, MIN(game_id), MAX(game_id) FROM "
-                "(SELECT source, game_id, game_id - ROW_NUMBER() OVER "
-                " (PARTITION BY source ORDER BY game_id) AS grp FROM games) "
-                "GROUP BY source, grp").fetchall()
-            self._intervals_max_gid = max_gid
-        return self._intervals
+        with self._lock:
+            max_gid = self.conn.execute(
+                "SELECT MAX(game_id) FROM games").fetchone()[0]
+            if self._intervals is None or self._intervals_max_gid != max_gid:
+                self._intervals = self.conn.execute(
+                    "SELECT source, MIN(game_id), MAX(game_id) FROM "
+                    "(SELECT source, game_id, game_id - ROW_NUMBER() OVER "
+                    " (PARTITION BY source ORDER BY game_id) AS grp FROM games) "
+                    "GROUP BY source, grp").fetchall()
+                self._intervals_max_gid = max_gid
+            return self._intervals
 
     def set_source_intervals(self, intervals, max_gid) -> None:
         """事前計算した島表を渡してキャッシュを温める。
 
         compute_source_intervals() をバックグラウンドスレッドで走らせ、
         結果をここに渡すと、最初の出典絞り込みで数秒待たずに済む。"""
-        if max_gid is not None:
-            self._intervals = intervals
-            self._intervals_max_gid = max_gid
+        with self._lock:
+            if max_gid is not None:
+                self._intervals = intervals
+                self._intervals_max_gid = max_gid
 
     def _source_condition(self, sources: "set[str]") -> str:
         """有効出典の集合を pg.game_id の区間条件 (SQL断片) に変換する。"""
@@ -265,7 +273,8 @@ class PrecedentReader:
         return "AND (" + (" OR ".join(terms) if terms else "0") + ")"
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self.conn.close()
 
     def __enter__(self) -> "PrecedentReader":
         return self
@@ -275,29 +284,30 @@ class PrecedentReader:
 
     def lookup(self, sfen: str, max_precedents: int = DEFAULT_PAGE_SIZE):
         """Return (candidates, precedents, total_games) for a position."""
-        sfen_main = normalize_sfen_main(sfen)
-        key = position_key_from_sfen(sfen_main)
-        candidates = [
-            Candidate(move16_to_usi(m) if m else "(end)", c, b, w, d)
-            for m, c, b, w, d in self.conn.execute(
-                "SELECT next_move, game_count, black_wins, white_wins, draws "
-                "FROM position_stats WHERE position_key = ? "
-                "ORDER BY game_count DESC", (key,))]
-        if not candidates:
-            # Singleton positions carry no stats row; aggregate on the fly
-            # (at most a handful of position_games rows by construction).
+        with self._lock:
+            sfen_main = normalize_sfen_main(sfen)
+            key = position_key_from_sfen(sfen_main)
             candidates = [
-                Candidate(move16_to_usi(m) if m else "(end)", c, b or 0, w or 0, d or 0)
+                Candidate(move16_to_usi(m) if m else "(end)", c, b, w, d)
                 for m, c, b, w, d in self.conn.execute(
-                    "SELECT pg.next_move, COUNT(*), SUM(g.result IS 1), "
-                    "       SUM(g.result IS 2), SUM(g.result IS 0) "
-                    "FROM position_games pg JOIN games g USING (game_id) "
-                    "WHERE pg.position_key = ? GROUP BY pg.next_move "
-                    "ORDER BY COUNT(*) DESC", (key,))]
-        total_games = sum(c.game_count for c in candidates)
+                    "SELECT next_move, game_count, black_wins, white_wins, draws "
+                    "FROM position_stats WHERE position_key = ? "
+                    "ORDER BY game_count DESC", (key,))]
+            if not candidates:
+                # Singleton positions carry no stats row; aggregate on the fly
+                # (at most a handful of position_games rows by construction).
+                candidates = [
+                    Candidate(move16_to_usi(m) if m else "(end)", c, b or 0, w or 0, d or 0)
+                    for m, c, b, w, d in self.conn.execute(
+                        "SELECT pg.next_move, COUNT(*), SUM(g.result IS 1), "
+                        "       SUM(g.result IS 2), SUM(g.result IS 0) "
+                        "FROM position_games pg JOIN games g USING (game_id) "
+                        "WHERE pg.position_key = ? GROUP BY pg.next_move "
+                        "ORDER BY COUNT(*) DESC", (key,))]
+            total_games = sum(c.game_count for c in candidates)
 
-        precedents = self.precedents_page(sfen, limit=max_precedents)
-        return candidates, precedents, total_games
+            precedents = self.precedents_page(sfen, limit=max_precedents)
+            return candidates, precedents, total_games
 
     def confluence_counts(self, sfen: str, candidates) -> "dict[str, int]":
         """各候補手を指した後の局面に「別手順で合流してくる」出現数。
@@ -313,26 +323,27 @@ class PrecedentReader:
         pos = Position()
         pos.set_sfen(normalize_sfen_main(sfen))
         out: dict[str, int] = {}
-        for c in candidates:
-            if not c.usi or c.usi == "(end)":
-                continue
-            code = usi_to_move16(c.usi)
-            if code is None:
-                continue
-            nxt = pos.copy()
-            try:
-                apply_move16(nxt, code)
-            except (ValueError, KeyError, TypeError):
-                continue
-            key = nxt.position_key()
-            total = self.conn.execute(
-                "SELECT SUM(game_count) FROM position_stats "
-                "WHERE position_key = ?", (key,)).fetchone()[0]
-            if total is None:  # 集計行が無い = その局面は単独対局 (合流なし)
+        with self._lock:
+            for c in candidates:
+                if not c.usi or c.usi == "(end)":
+                    continue
+                code = usi_to_move16(c.usi)
+                if code is None:
+                    continue
+                nxt = pos.copy()
+                try:
+                    apply_move16(nxt, code)
+                except (ValueError, KeyError, TypeError):
+                    continue
+                key = nxt.position_key()
                 total = self.conn.execute(
-                    "SELECT COUNT(*) FROM position_games "
+                    "SELECT SUM(game_count) FROM position_stats "
                     "WHERE position_key = ?", (key,)).fetchone()[0]
-            out[c.usi] = max(total - c.game_count, 0)
+                if total is None:  # 集計行が無い = その局面は単独対局 (合流なし)
+                    total = self.conn.execute(
+                        "SELECT COUNT(*) FROM position_games "
+                        "WHERE position_key = ?", (key,)).fetchone()[0]
+                out[c.usi] = max(total - c.game_count, 0)
         return out
 
     def transposition_moves(self, sfen: str, candidates) -> "list[tuple[str, int]]":
@@ -349,25 +360,26 @@ class PrecedentReader:
         pos = Position()
         pos.set_sfen(normalize_sfen_main(sfen))
         out: list[tuple[str, int]] = []
-        for code in pos.pseudo_legal_moves():
-            usi = move16_to_usi(code)
-            if usi in played:
-                continue
-            nxt = pos.copy()
-            try:
-                apply_move16(nxt, code)
-            except (ValueError, KeyError, TypeError):
-                continue
-            key = nxt.position_key()
-            total = self.conn.execute(
-                "SELECT SUM(game_count) FROM position_stats "
-                "WHERE position_key = ?", (key,)).fetchone()[0]
-            if total is None:
+        with self._lock:
+            for code in pos.pseudo_legal_moves():
+                usi = move16_to_usi(code)
+                if usi in played:
+                    continue
+                nxt = pos.copy()
+                try:
+                    apply_move16(nxt, code)
+                except (ValueError, KeyError, TypeError):
+                    continue
+                key = nxt.position_key()
                 total = self.conn.execute(
-                    "SELECT COUNT(*) FROM position_games "
+                    "SELECT SUM(game_count) FROM position_stats "
                     "WHERE position_key = ?", (key,)).fetchone()[0]
-            if total:
-                out.append((usi, total))
+                if total is None:
+                    total = self.conn.execute(
+                        "SELECT COUNT(*) FROM position_games "
+                        "WHERE position_key = ?", (key,)).fetchone()[0]
+                if total:
+                    out.append((usi, total))
         out.sort(key=lambda x: -x[1])
         return out
 
@@ -409,27 +421,28 @@ class PrecedentReader:
             name_sql, name_params = _name_query_condition(name_query)
             condition += name_sql
             params += name_params
-        if sources is not None:
-            try:
-                condition += self._source_condition(sources)
-            except sqlite3.OperationalError:
-                # window関数の無い古いSQLite: 結合側で絞る (走査は遅くなる)
-                names = ",".join(f"'{s}'" for s in sources
-                                 if s in KNOWN_SOURCES)
-                parts = [f"g.source IN ({names})"] if names else []
-                if "other" in sources:
-                    known = ",".join(f"'{s}'" for s in KNOWN_SOURCES)
-                    parts.append(f"g.source NOT IN ({known})")
-                condition += "AND (" + (" OR ".join(parts) or "0") + ")"
-        rows = self.conn.execute(
-            "SELECT g.game_id, g.event, g.source, g.started_at, "
-            "       g.black_name, g.white_name, pg.next_move, "
-            "       g.result, g.end_reason, pg.ply, g.ply_count, "
-            "       pg.sort_key "
-            "FROM position_games pg JOIN games g USING (game_id) "
-            f"WHERE pg.position_key = ? {condition} "
-            "ORDER BY pg.sort_key DESC, pg.game_id DESC "
-            "LIMIT ?", params + [limit])
+        with self._lock:
+            if sources is not None:
+                try:
+                    condition += self._source_condition(sources)
+                except sqlite3.OperationalError:
+                    # window関数の無い古いSQLite: 結合側で絞る (走査は遅くなる)
+                    names = ",".join(f"'{s}'" for s in sources
+                                     if s in KNOWN_SOURCES)
+                    parts = [f"g.source IN ({names})"] if names else []
+                    if "other" in sources:
+                        known = ",".join(f"'{s}'" for s in KNOWN_SOURCES)
+                        parts.append(f"g.source NOT IN ({known})")
+                    condition += "AND (" + (" OR ".join(parts) or "0") + ")"
+            rows = self.conn.execute(
+                "SELECT g.game_id, g.event, g.source, g.started_at, "
+                "       g.black_name, g.white_name, pg.next_move, "
+                "       g.result, g.end_reason, pg.ply, g.ply_count, "
+                "       pg.sort_key "
+                "FROM position_games pg JOIN games g USING (game_id) "
+                f"WHERE pg.position_key = ? {condition} "
+                "ORDER BY pg.sort_key DESC, pg.game_id DESC "
+                "LIMIT ?", params + [limit]).fetchall()
         return [
             Precedent(game_id=r[0], event=r[1], source=r[2],
                       started_at=r[3] or "", black_name=r[4], white_name=r[5],
@@ -440,18 +453,23 @@ class PrecedentReader:
 
     def get_source_path(self, game_id: int) -> str | None:
         """取り込み元の棋譜ファイルのパス (台帳に記録があれば)。"""
-        row = self.conn.execute(
-            "SELECT path FROM source_files WHERE game_id = ?",
-            (game_id,)).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT path FROM source_files WHERE game_id = ?",
+                (game_id,)).fetchone()
         return row[0] if row else None
 
     def get_game(self, game_id: int) -> "GameDetail | None":
-        row = self.conn.execute(
-            "SELECT event, source, started_at, black_name, white_name, "
-            "       result, end_reason, initial_sfen, moves "
-            "FROM games WHERE game_id = ?", (game_id,)).fetchone()
-        if row is None:
-            return None
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT event, source, started_at, black_name, white_name, "
+                "       result, end_reason, initial_sfen, moves "
+                "FROM games WHERE game_id = ?", (game_id,)).fetchone()
+            if row is None:
+                return None
+            analysis_row = self.conn.execute(
+                "SELECT evals, pvs FROM game_analysis WHERE game_id = ?",
+                (game_id,)).fetchone()
         moves = array.array("H")
         moves.frombytes(row[8])
         detail = GameDetail(
@@ -459,9 +477,6 @@ class PrecedentReader:
             black_name=row[3], white_name=row[4], result=row[5],
             end_reason=row[6], initial_sfen=row[7],
             moves_usi=[move16_to_usi(m) for m in moves])
-        analysis_row = self.conn.execute(
-            "SELECT evals, pvs FROM game_analysis WHERE game_id = ?",
-            (game_id,)).fetchone()
         if analysis_row:
             detail.evals = decode_evals(analysis_row[0])
             detail.pvs_usi = [[move16_to_usi(m) for m in pv]
@@ -606,43 +621,3 @@ def get_game(db_path: str | Path, game_id: int) -> GameDetail | None:
     """One-shot variant of PrecedentReader.get_game (opens/closes per call)."""
     with PrecedentReader(db_path) as reader:
         return reader.get_game(game_id)
-
-
-def format_report(sfen: str, candidates, precedents, total_games: int) -> str:
-    """Plain-text report in the spirit of the KiriCompass precedent pane."""
-    from .board import Position, usi_to_move16
-    from .ki2 import move16_to_ki2
-
-    position = Position()
-    position.set_sfen(normalize_sfen_main(sfen))
-
-    def ki2(usi: str) -> str:
-        code = usi_to_move16(usi) if usi else None
-        return move16_to_ki2(position, code) if code is not None else "(終局)"
-
-    lines = [f"sfen {normalize_sfen_main(sfen)}",
-             f"前例: {total_games}局", ""]
-    if candidates:
-        lines.append("No. 指し手        USI     出現   先手勝  後手勝  引分   勝率")
-        for rank, c in enumerate(candidates, start=1):
-            # 引き分けは後手勝ち扱いで先手勝率を算出する
-            decided = c.black_wins + c.white_wins + c.draws
-            rate = (f"{c.black_wins / decided * 100:5.1f}%" if decided else "   -  ")
-            lines.append(f"{rank:>3} {ki2(c.usi) if c.usi != '(end)' else '(終局)':<12}"
-                         f" {c.usi:<7} {c.game_count:>5} {c.black_wins:>7} "
-                         f"{c.white_wins:>7} {c.draws:>5} {rate:>7}")
-    else:
-        lines.append("(前例なし)")
-    lines.append("")
-    if precedents:
-        lines.append("No. 対局日      先手 / 後手                         "
-                     "次の一手    結果  終局理由  URL")
-        for rank, p in enumerate(precedents, start=1):
-            result = {1: "先手勝", 2: "後手勝", 0: "引分"}.get(p.result, "不明")
-            reason = REASON_JA.get(p.end_reason, p.end_reason)
-            players = f"{p.black_name} / {p.white_name}"
-            date = p.started_at[:10].replace("-", "/")
-            lines.append(f"{rank:>3} {date:<11} {players:<35} "
-                         f"{ki2(p.next_move_usi):<10} {result:<5} "
-                         f"{reason:<5} {p.url or ''}")
-    return "\n".join(lines) + "\n"

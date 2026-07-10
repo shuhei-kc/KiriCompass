@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS source_files (
     path          TEXT PRIMARY KEY,
     file_size     INTEGER NOT NULL,
     file_mtime_ns INTEGER NOT NULL,
-    status     TEXT NOT NULL,               -- ok / unfinished / duplicate / error
+    status     TEXT NOT NULL,               -- ok / unfinished / empty /
+                                            -- duplicate / error / conflict(.sfen)
     detail     TEXT,
     game_id    INTEGER,
     ingested_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -161,7 +162,8 @@ def _migrate_if_needed(conn: sqlite3.Connection) -> None:
 
 def open_read_only(db_path: str | Path) -> sqlite3.Connection:
     # check_same_thread=False: readers are used from GUI worker threads;
-    # SQLite objects are safe here because each reader serializes its use.
+    # PrecedentReader serializes all access to a shared connection with an
+    # RLock (query.py), so cross-thread use is safe.
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0,
                            check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=5000")
