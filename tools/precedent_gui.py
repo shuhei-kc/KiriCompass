@@ -41,6 +41,8 @@ from kifudb.db import open_read_only  # noqa: E402
 from kifudb.floodgate import update_once  # noqa: E402
 from kifudb.ingest import ingest_folder  # noqa: E402
 from kifudb.query import extend_source_intervals  # noqa: E402
+from kifudb.sfen_ingest import (delete_batch, ingest_file,  # noqa: E402
+                                list_batches, scan_file)
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR  # noqa: E402
 
 SYNC_POLL_MS = 300
@@ -80,6 +82,9 @@ CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
 # floodgate逐次更新の一時保存フォルダ (取り込み後に削除される。詳細は
 # kifudb/floodgate.py)。未終局・エラーのファイルだけが一時的に残る。
 FLOODGATE_MIRROR = Path(__file__).resolve().parent.parent / "data" / "floodgate"
+# 掘り棋譜 (.sfen) 専用DBの既定パス。実対局の前例DBとは分けて管理する
+# (統計の意味が異なる上、バッチ削除の誤爆半径を隔離するため)。
+DEFAULT_SFEN_DB = Path(__file__).resolve().parent.parent / "data" / "sfen.db"
 # 自動更新の実行タイミング: 毎時この分を窓の開始とし、ジッタ秒を足して実行。
 # :20/:50 + 0〜300秒 = 対局開始 (:00/:30) の5〜10分前のどこか。全利用者が
 # 同一秒にwdoorへ殺到しないよう、起動ごとのランダムなずれで分散させる。
@@ -180,6 +185,7 @@ class PrecedentViewer:
         self._auto_update_after: str | None = None  # スケジューラのafter ID
         self._auto_jitter = random.randint(0, AUTO_UPDATE_JITTER)  # 群れ分散
         self._update_win: tk.Toplevel | None = None
+        self._sfen_win: tk.Toplevel | None = None
         self._update_log_lines: list[str] = []  # ウィンドウ再表示用の履歴
 
         self._setup_fonts()
@@ -217,7 +223,10 @@ class PrecedentViewer:
         ttk.Button(top, text="参照...", command=self._browse_db).grid(row=0, column=2)
         ttk.Button(top, text="DB更新...", command=self._open_update_window).grid(
             row=0, column=3, padx=(4, 0))
+        ttk.Button(top, text="掘り棋譜...", command=self._open_sfen_window).grid(
+            row=0, column=4, padx=(4, 0))
         self.auto_update_var = tk.BooleanVar(value=False)
+        self.sfen_db_var = tk.StringVar(value=str(DEFAULT_SFEN_DB))
 
         ttk.Label(top, text="SFEN:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
         self.sfen_var = tk.StringVar()
@@ -735,6 +744,221 @@ class PrecedentViewer:
             text.see(tk.END)
             text.config(state=tk.DISABLED)
 
+    # -- 掘り棋譜 (.sfen) 管理ウィンドウ -------------------------------------
+
+    def _open_sfen_window(self) -> None:
+        if self._sfen_win is not None and self._sfen_win.winfo_exists():
+            self._sfen_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("掘り棋譜 (.sfen) の管理")
+        win.geometry("760x480")
+        self._sfen_win = win
+
+        top = ttk.Frame(win, padding=8)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="専用DB:").pack(side=tk.LEFT)
+        ttk.Entry(top, textvariable=self.sfen_db_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        ttk.Button(top, text="ビューアで開く",
+                   command=self._open_sfen_db_in_viewer).pack(side=tk.RIGHT)
+
+        buttons = ttk.Frame(win, padding=(8, 0))
+        buttons.pack(fill=tk.X)
+        ttk.Button(buttons, text=".sfenファイルを追加...",
+                   command=self._add_sfen_files).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="追記を取り込み (全バッチ)",
+                   command=self._refresh_sfen_batches_ingest).pack(
+            side=tk.LEFT, padx=(6, 0))
+        ttk.Button(buttons, text="選択バッチを削除",
+                   command=self._delete_selected_batch).pack(
+            side=tk.LEFT, padx=(6, 0))
+        ttk.Label(win, foreground="gray", padding=(8, 2), wraplength=730,
+                  justify=tk.LEFT,
+                  text="1ファイル=1バッチ。課題局面までの共通手順は擬似対局として"
+                       "1回だけ登録される (終局理由列に「課題局面」)。追記は自動で"
+                       "追加分のみ取り込み、既読部分が書き換わったファイルは "
+                       "conflict になる (削除→追加で編集を反映)。").pack(anchor=tk.W)
+
+        tree_holder = ttk.Frame(win, padding=8)
+        tree_holder.pack(fill=tk.BOTH, expand=True)
+        cols = ("batch", "label", "date", "games", "prefix", "status")
+        tree = ttk.Treeview(tree_holder, columns=cols, show="headings")
+        for col, text_, width, anchor in (
+                ("batch", "バッチ", 190, tk.W), ("label", "ラベル", 180, tk.W),
+                ("date", "日付", 90, tk.W), ("games", "局数", 70, tk.E),
+                ("prefix", "課題手数", 70, tk.E),
+                ("status", "状態", 80, tk.CENTER)):
+            tree.heading(col, text=text_)
+            tree.column(col, width=width, anchor=anchor,
+                        stretch=col in ("batch", "label"))
+        scroll = ttk.Scrollbar(tree_holder, orient=tk.VERTICAL,
+                               command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._sfen_tree = tree
+        self._refresh_sfen_list()
+
+    def _sfen_db(self) -> str:
+        return self.sfen_db_var.get().strip() or str(DEFAULT_SFEN_DB)
+
+    def _open_sfen_db_in_viewer(self) -> None:
+        self.db_var.set(self._sfen_db())
+        if self.sfen_var.get().strip():
+            self.search()
+
+    def _refresh_sfen_list(self) -> None:
+        tree = getattr(self, "_sfen_tree", None)
+        if tree is None or not tree.winfo_exists():
+            return
+        tree.delete(*tree.get_children())
+        db = self._sfen_db()
+        if not Path(db).is_file():
+            return
+        try:
+            batches = list_batches(db)
+        except Exception:  # noqa: BLE001 - 対象DBが前例DB等でも落とさない
+            return
+        for b in batches:
+            tree.insert("", tk.END, iid=b["path"], values=(
+                b["stem"], b["label"], b["date"], b["games"],
+                b["prefix"] or "-", b["status"]))
+
+    def _guard_sfen_db(self) -> str | None:
+        """取り込み先が実対局の前例DBだったら警告する (誤爆防止)。"""
+        db = self._sfen_db()
+        if Path(db).is_file():
+            try:
+                conn = open_read_only(db)
+                try:
+                    mixed = conn.execute(
+                        "SELECT 1 FROM games WHERE source != 'sfen' LIMIT 1"
+                    ).fetchone()
+                finally:
+                    conn.close()
+            except Exception:  # noqa: BLE001
+                mixed = None
+            if mixed and not messagebox.askyesno(
+                    "確認",
+                    "このDBには実対局の前例が入っています。掘り棋譜は専用DBに"
+                    "分けることを推奨します。\nそれでも取り込みますか？",
+                    parent=self._sfen_win):
+                return None
+        return db
+
+    def _add_sfen_files(self) -> None:
+        db = self._guard_sfen_db()
+        if db is None:
+            return
+        paths = filedialog.askopenfilenames(
+            title="掘り棋譜 (.sfen) を選択", parent=self._sfen_win,
+            filetypes=[("sfen棋譜", "*.sfen"), ("All", "*")])
+        for p in paths:
+            known = Path(db).is_file() and any(
+                b["path"] == p for b in list_batches(db))
+            if known:
+                self._enqueue_sfen_ingest(p, None, None)  # 追記は尋ねず自動
+            else:
+                params = self._sfen_preview_dialog(p)
+                if params is not None:
+                    self._enqueue_sfen_ingest(p, *params)
+
+    def _sfen_preview_dialog(self, path: str):
+        """新規バッチの取り込み前プレビュー。(label, date) か None(スキップ)。"""
+        try:
+            scan = scan_file(path)
+        except OSError as exc:
+            messagebox.showerror("エラー", f"{path}: {exc}",
+                                 parent=self._sfen_win)
+            return None
+        dialog = tk.Toplevel(self._sfen_win or self.root)
+        dialog.title("バッチの取り込み")
+        dialog.transient(self._sfen_win or self.root)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        rows = [("ファイル", Path(path).name),
+                ("局数", f"{scan.games}局"
+                         + (f" (警告 {len(scan.skipped)}行)" if scan.skipped else "")),
+                ("課題局面", f"{scan.prefix_len}手目" if scan.prefix_len
+                             else "検出なし (1局のみ等)")]
+        for i, (k, v) in enumerate(rows):
+            ttk.Label(frame, text=f"{k}:").grid(row=i, column=0, sticky=tk.W)
+            ttk.Label(frame, text=v).grid(row=i, column=1, sticky=tk.W, padx=6)
+        ttk.Label(frame, text="日付:").grid(row=3, column=0, sticky=tk.W)
+        date_var = tk.StringVar(value=scan.date_str)
+        ttk.Entry(frame, textvariable=date_var, width=24).grid(
+            row=3, column=1, sticky=tk.W, padx=6)
+        ttk.Label(frame, text="ラベル:").grid(row=4, column=0, sticky=tk.W)
+        label_var = tk.StringVar()
+        entry = ttk.Entry(frame, textvariable=label_var, width=32)
+        entry.grid(row=4, column=1, sticky=tk.W, padx=6)
+        ttk.Label(frame, foreground="gray",
+                  text="エンジン名・深さ等 (対局者名として表示。空ならファイル名)"
+                  ).grid(row=5, column=1, sticky=tk.W, padx=6)
+        result: dict = {}
+        btns = ttk.Frame(frame)
+        btns.grid(row=6, column=0, columnspan=2, pady=(10, 0))
+
+        def accept():
+            result["ok"] = True
+            dialog.destroy()
+
+        ttk.Button(btns, text="取り込む", command=accept).pack(
+            side=tk.LEFT, padx=4)
+        ttk.Button(btns, text="スキップ", command=dialog.destroy).pack(
+            side=tk.LEFT, padx=4)
+        entry.focus_set()
+        dialog.wait_window()
+        if not result.get("ok"):
+            return None
+        return label_var.get().strip(), date_var.get().strip()
+
+    def _enqueue_sfen_ingest(self, path: str, label, date_str) -> None:
+        db = self._sfen_db()
+
+        def job():
+            ingest_file(db, path, label=label or "",
+                        date_str=date_str if date_str else None,
+                        log_line=lambda m: self._ulog(f"[掘り] {m}"))
+            self.root.after(0, self._refresh_sfen_list)
+
+        self._db_jobs.put(("掘り棋譜取り込み", job))
+
+    def _refresh_sfen_batches_ingest(self) -> None:
+        """登録済み全バッチのファイルを再走査し、追記分を自動取り込み。"""
+        db = self._sfen_db()
+        if not Path(db).is_file():
+            return
+        for b in list_batches(db):
+            if Path(b["path"]).is_file():
+                self._enqueue_sfen_ingest(b["path"], None, None)
+
+    def _delete_selected_batch(self) -> None:
+        tree = getattr(self, "_sfen_tree", None)
+        if tree is None:
+            return
+        selection = tree.selection()
+        if not selection:
+            return
+        path = selection[0]
+        stem = Path(path).stem
+        db = self._sfen_db()
+        if not messagebox.askyesno(
+                "確認", f"バッチ「{stem}」を専用DBから完全に削除します。\n"
+                        "よろしいですか？ (.sfenファイル自体は消えません)",
+                parent=self._sfen_win):
+            return
+
+        def job():
+            deleted = delete_batch(db, path,
+                                   log_line=lambda m: self._ulog(f"[掘り] {m}"))
+            self.root.after(0, self._refresh_sfen_list)
+            self._ulog(f"[掘り] {stem}: {deleted}件削除")
+
+        self._db_jobs.put(("掘りバッチ削除", job))
+
     def _enabled_sources(self):
         """有効な出典キーの集合。全てONなら None (絞り込み無しの高速経路)。"""
         enabled = frozenset(k for k, v in self.source_filter_vars.items()
@@ -1078,6 +1302,8 @@ class PrecedentViewer:
             self.db_var.set(config.get("db_path", ""))
             self.sfen_var.set(config.get("last_sfen", ""))
             self.auto_update_var.set(bool(config.get("floodgate_auto_update")))
+            if config.get("sfen_db_path"):
+                self.sfen_db_var.set(config["sfen_db_path"])
             if config.get("sync_file"):
                 self._sync_file = Path(config["sync_file"])
         except (OSError, json.JSONDecodeError):
@@ -1089,7 +1315,8 @@ class PrecedentViewer:
             CONFIG_PATH.write_text(json.dumps({
                 "db_path": self.db_var.get().strip(),
                 "last_sfen": self.sfen_var.get().strip(),
-                "floodgate_auto_update": self.auto_update_var.get()},
+                "floodgate_auto_update": self.auto_update_var.get(),
+                "sfen_db_path": self.sfen_db_var.get().strip()},
                 ensure_ascii=False))
         except OSError:
             pass
