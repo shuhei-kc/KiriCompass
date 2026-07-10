@@ -39,7 +39,8 @@ from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
                           tournament_label)
 from kifudb.db import open_read_only  # noqa: E402
 from kifudb.floodgate import update_once  # noqa: E402
-from kifudb.ingest import ingest_folder  # noqa: E402
+from kifudb.ingest import (KIFU_SUFFIXES, detect_source,  # noqa: E402
+                           ingest_folder)
 from kifudb.query import extend_source_intervals  # noqa: E402
 from kifudb.sfen_ingest import (delete_batch, ingest_file,  # noqa: E402
                                 list_batches, scan_file)
@@ -85,6 +86,10 @@ FLOODGATE_MIRROR = Path(__file__).resolve().parent.parent / "data" / "floodgate"
 # 掘り棋譜 (.sfen) 専用DBの既定パス。実対局の前例DBとは分けて管理する
 # (統計の意味が異なる上、バッチ削除の誤爆半径を隔離するため)。
 DEFAULT_SFEN_DB = Path(__file__).resolve().parent.parent / "data" / "sfen.db"
+# 個人入手棋譜 (公開されていない csa/kif) の既定DB。誰でも入手できる公開棋譜
+# (floodgate/WCSC/電竜戦) は公開前例DBに集め、それ以外はこちらに自動振り分け
+# する — 公開DBを配布しても私的な棋譜が混ざらないようにするため。
+DEFAULT_PRIVATE_DB = Path(__file__).resolve().parent.parent / "data" / "private.db"
 # 自動更新の実行タイミング: 毎時この分を窓の開始とし、ジッタ秒を足して実行。
 # :20/:50 + 0〜300秒 = 対局開始 (:00/:30) の5〜10分前のどこか。全利用者が
 # 同一秒にwdoorへ殺到しないよう、起動ごとのランダムなずれで分散させる。
@@ -227,9 +232,10 @@ class PrecedentViewer:
             row=0, column=4, padx=(4, 0))
         self.auto_update_var = tk.BooleanVar(value=False)
         self.sfen_db_var = tk.StringVar(value=str(DEFAULT_SFEN_DB))
-        # floodgate更新の対象DB。ビューアの表示DBに追従させると、掘り棋譜DB等を
-        # 開いている間の自動サイクルがそちらへ取り込んでしまうため、固定で持つ。
+        # floodgate更新・公開棋譜の取り込み先DB。ビューアの表示DBに追従させると
+        # 掘り棋譜DB等を開いている間の自動サイクルが誤爆するため、固定で持つ。
         self.fg_db_var = tk.StringVar(value="")
+        self.private_db_var = tk.StringVar(value=str(DEFAULT_PRIVATE_DB))
 
         ttk.Label(top, text="SFEN:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
         self.sfen_var = tk.StringVar()
@@ -591,15 +597,6 @@ class PrecedentViewer:
             return None
         return db_path
 
-    def _current_db_or_warn(self) -> str | None:
-        db_path = self.db_var.get().strip()
-        if not db_path or not Path(db_path).is_file():
-            messagebox.showerror(
-                "エラー", "有効なDBファイルを指定してください。",
-                parent=self._dialog_parent())
-            return None
-        return db_path
-
     def _enqueue_floodgate(self, label: str, days: int = 2,
                            quiet: bool = False) -> None:
         if self._floodgate_queued:
@@ -619,28 +616,52 @@ class PrecedentViewer:
         self._db_jobs.put(("floodgate", job))
 
     def _enqueue_folder_ingest(self) -> None:
-        db_path = self._current_db_or_warn()
-        if db_path is None:
+        """フォルダ内の棋譜を公開/プライベートに自動振り分けて取り込む。
+
+        振り分けはファイル名 (stem) の出典判定: wdoor/WCSC/電竜戦と判定できる
+        ものは公開前例DBへ、それ以外はプライベートDBへ。公開DBを配布しても
+        私的な棋譜が混ざらないようにするための既定動作。"""
+        public_db = self._floodgate_target_db()  # 検証込み (sfen混入も拒否)
+        if public_db is None:
             return
-        if self._db_has_sfen_games(db_path) and not messagebox.askyesno(
-                "確認", "現在のDBには掘り棋譜 (sfen) が入っています。実対局の"
-                        "棋譜は前例DBに取り込むことを推奨します。\n"
-                        "それでもこのDBに取り込みますか？",
-                parent=self._dialog_parent()):
+        private_db = self.private_db_var.get().strip() or str(DEFAULT_PRIVATE_DB)
+        if self._db_has_sfen_games(private_db):
+            messagebox.showerror(
+                "エラー", "プライベートDBに掘り棋譜 (sfen) が入っています。"
+                          "別のパスを指定してください。",
+                parent=self._dialog_parent())
             return
         folder = filedialog.askdirectory(
-            title="取り込む棋譜フォルダを選択",
-            parent=self._update_win or self.root)
+            title="取り込む棋譜フォルダを選択", parent=self._dialog_parent())
         if not folder:
             return
 
+        def is_public(p: Path) -> bool:
+            return detect_source(p.stem) != "other"
+
         def job():
             self._ulog(f"[取り込み] 開始: {folder}")
-            stats = ingest_folder(
-                db_path, folder,
-                progress=lambda i, n: self._ulog(f"[取り込み] {i}/{n}"))
-            self._ulog(f"[取り込み] 完了: {stats.summary()}")
-            self._after_db_update(db_path)
+            files = [p for p in Path(folder).rglob("*")
+                     if p.suffix.lower() in KIFU_SUFFIXES and p.is_file()]
+            n_public = sum(1 for p in files if is_public(p))
+            n_private = len(files) - n_public
+            self._ulog(f"[取り込み] 振り分け: 公開 {n_public} / "
+                       f"プライベート {n_private}")
+            if n_public:
+                stats = ingest_folder(
+                    public_db, folder, file_filter=is_public,
+                    progress=lambda i, n: self._ulog(f"[取り込み 公開] {i}/{n}"))
+                self._ulog(f"[取り込み 公開DB] {stats.summary()}")
+                self._after_db_update(public_db)
+            if n_private:
+                stats = ingest_folder(
+                    private_db, folder,
+                    file_filter=lambda p: not is_public(p),
+                    progress=lambda i, n: self._ulog(f"[取り込み 私] {i}/{n}"))
+                self._ulog(f"[取り込み プライベートDB] {stats.summary()}")
+                self._after_db_update(private_db)
+            if not files:
+                self._ulog("[取り込み] 対象ファイルがありません")
 
         self._db_jobs.put(("フォルダ取り込み", job))
 
@@ -731,33 +752,48 @@ class PrecedentViewer:
         win.geometry("680x480")
         self._update_win = win
 
+        db_frame = ttk.LabelFrame(win, text="取り込み先", padding=8)
+        db_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        def db_row(label_text, var, title):
+            row = ttk.Frame(db_frame)
+            row.pack(fill=tk.X, pady=1)
+            ttk.Label(row, text=label_text, width=14).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=var).pack(
+                side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+            def browse():
+                chosen = filedialog.askopenfilename(
+                    title=title, parent=win,
+                    filetypes=[("SQLite DB", "*.db *.sqlite"), ("All", "*")])
+                if chosen:
+                    var.set(chosen)
+                    self._save_config()
+
+            ttk.Button(row, text="参照...", command=browse).pack(side=tk.RIGHT)
+
+        db_row("公開前例DB:", self.fg_db_var, "公開前例DBを選択")
+        db_row("プライベートDB:", self.private_db_var, "プライベートDBを選択")
+        ttk.Label(db_frame, foreground="gray", wraplength=630, justify=tk.LEFT,
+                  text="公開前例DB = 誰でも入手できる棋譜 (floodgate/WCSC/電竜戦)。"
+                       "配布・共有できる状態を保つため、個人入手の棋譜は"
+                       "プライベートDBへ自動で振り分けられる。").pack(
+            anchor=tk.W, pady=(4, 0))
+
         folder_frame = ttk.LabelFrame(win, text="フォルダ取り込み", padding=8)
-        folder_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
-        ttk.Button(folder_frame, text="フォルダを選択して取り込み...",
+        folder_frame.pack(fill=tk.X, padx=8, pady=4)
+        ttk.Button(folder_frame, text="フォルダを選択して振り分け取り込み...",
                    command=self._enqueue_folder_ingest).pack(anchor=tk.W)
         ttk.Label(folder_frame,
-                  text="フォルダ内の棋譜 (サブフォルダ含む) を現在のDBに増分登録します。"
-                       "再実行しても安全です。",
-                  foreground="gray").pack(anchor=tk.W, pady=(4, 0))
+                  text="フォルダ内の棋譜 (サブフォルダ含む) を増分登録します。"
+                       "ファイル名から wdoor/WCSC/電竜戦 と判定できるものは"
+                       "公開前例DBへ、それ以外はプライベートDBへ。再実行しても安全です。",
+                  foreground="gray", wraplength=630, justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(4, 0))
 
-        fg_frame = ttk.LabelFrame(win, text="floodgate 逐次更新", padding=8)
+        fg_frame = ttk.LabelFrame(win, text="floodgate 逐次更新 (公開前例DBへ)",
+                                  padding=8)
         fg_frame.pack(fill=tk.X, padx=8, pady=4)
-        target_row = ttk.Frame(fg_frame)
-        target_row.pack(fill=tk.X, pady=(0, 4))
-        ttk.Label(target_row, text="取り込み先DB:").pack(side=tk.LEFT)
-        ttk.Entry(target_row, textvariable=self.fg_db_var).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-
-        def browse_fg_db():
-            chosen = filedialog.askopenfilename(
-                title="floodgateの取り込み先DBを選択", parent=win,
-                filetypes=[("SQLite DB", "*.db *.sqlite"), ("All", "*")])
-            if chosen:
-                self.fg_db_var.set(chosen)
-                self._save_config()
-
-        ttk.Button(target_row, text="参照...", command=browse_fg_db).pack(
-            side=tk.RIGHT)
         minutes = "/".join(f":{m:02d}" for m in AUTO_UPDATE_MINUTES)
         ttk.Checkbutton(
             fg_frame,
@@ -988,13 +1024,56 @@ class PrecedentViewer:
         self._db_jobs.put(("掘り棋譜取り込み", job))
 
     def _refresh_sfen_batches_ingest(self) -> None:
-        """登録済み全バッチのファイルを再走査し、追記分を自動取り込み。"""
+        """登録済みバッチを再走査し、追記分を取り込む (1ジョブに集約)。
+
+        1ヶ月以上前の日付のバッチは対象外 (掘りが今も伸びていることはまず
+        無く、大量のファイル読みを避ける)。古いバッチを更新したいときは
+        「.sfenファイルを追加...」で同じファイルを選べば日付に関係なく処理
+        される。変更なしは無言、特記事項と最後の要約だけログに出す。"""
+        if getattr(self, "_sfen_refresh_queued", False):
+            self._ulog("[掘り] 更新チェックは既に実行待ちです")
+            return
         db = self._sfen_db()
         if not Path(db).is_file():
             return
+        cutoff = (datetime.now() - timedelta(days=31)).strftime("%Y-%m-%d")
+        targets, old, missing = [], 0, 0
         for b in list_batches(db):
-            if Path(b["path"]).is_file():
-                self._enqueue_sfen_ingest(b["path"], None, None)
+            if b["date"] and b["date"] < cutoff:
+                old += 1
+            elif not Path(b["path"]).is_file():
+                missing += 1
+            else:
+                targets.append(b["path"])
+        if not targets:
+            self._ulog(f"[掘り] 更新チェック対象なし"
+                       f" (1ヶ月超 {old}件 / ファイル欠落 {missing}件)")
+            return
+        self._sfen_refresh_queued = True
+
+        def job():
+            added = conflicts = unchanged = 0
+            try:
+                for p in targets:
+                    r = ingest_file(db, p)
+                    if r.conflict or r.rebuilt or r.added:
+                        self._ulog(f"[掘り] {Path(p).stem}: {r.summary()}")
+                    if r.conflict:
+                        conflicts += 1
+                    elif r.unchanged:
+                        unchanged += 1
+                    else:
+                        added += r.added
+                extra = (f" / 1ヶ月超スキップ {old}件" if old else "") + \
+                        (f" / ファイル欠落 {missing}件" if missing else "")
+                self._ulog(f"[掘り] 更新チェック完了: 確認 {len(targets)}件 / "
+                           f"追加 {added}局 / conflict {conflicts}件 / "
+                           f"変更なし {unchanged}件{extra}")
+            finally:
+                self._sfen_refresh_queued = False
+                self.root.after(0, self._refresh_sfen_list)
+
+        self._db_jobs.put(("掘り更新チェック", job))
 
     def _delete_selected_batch(self) -> None:
         tree = getattr(self, "_sfen_tree", None)
@@ -1366,6 +1445,8 @@ class PrecedentViewer:
             # 旧設定からの移行: 対象DB未設定なら当時のビューアDBを引き継ぐ
             self.fg_db_var.set(config.get("floodgate_db_path")
                                or config.get("db_path", ""))
+            if config.get("private_db_path"):
+                self.private_db_var.set(config["private_db_path"])
             if config.get("sfen_db_path"):
                 self.sfen_db_var.set(config["sfen_db_path"])
             if config.get("sync_file"):
@@ -1381,6 +1462,7 @@ class PrecedentViewer:
                 "last_sfen": self.sfen_var.get().strip(),
                 "floodgate_auto_update": self.auto_update_var.get(),
                 "floodgate_db_path": self.fg_db_var.get().strip(),
+                "private_db_path": self.private_db_var.get().strip(),
                 "sfen_db_path": self.sfen_db_var.get().strip()},
                 ensure_ascii=False))
         except OSError:
