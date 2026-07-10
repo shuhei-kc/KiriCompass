@@ -71,8 +71,11 @@ class SfenIngestResult:
     unchanged: bool = False
     rebuilt: bool = False          # 追記で課題局面が動き、バッチを再構築した
     prefix_len: int = 0
+    error: str = ""                # 取り込みを拒否した理由 (同名別内容など)
 
     def summary(self) -> str:
+        if self.error:
+            return self.error
         if self.conflict:
             return "conflict: 既読部分が変更されています (削除→再取り込みで反映)"
         if self.unchanged:
@@ -214,7 +217,7 @@ def _detail_row(conn: sqlite3.Connection, path: Path):
 
 
 def _insert_game(conn, event, started_at, label, initial_sfen, moves16,
-                 keys16, start_ply, result, reason, touched) -> None:
+                 keys16, start_ply, result, reason, touched) -> bool:
     cursor = conn.execute(
         "INSERT OR IGNORE INTO games (event, source, started_at, black_name, "
         "white_name, result, end_reason, ply_count, initial_sfen, moves) "
@@ -222,7 +225,7 @@ def _insert_game(conn, event, started_at, label, initial_sfen, moves16,
         (event, "sfen", started_at, label, label, result, reason,
          len(moves16), initial_sfen, array.array("H", moves16).tobytes()))
     if cursor.rowcount == 0:
-        return
+        return False
     game_id = cursor.lastrowid
     sort_key = date_sort_key(started_at)
     rows = []
@@ -233,6 +236,26 @@ def _insert_game(conn, event, started_at, label, initial_sfen, moves16,
         touched.add(keys16[ply])
     conn.executemany(
         "INSERT OR IGNORE INTO position_games VALUES (?,?,?,?,?)", rows)
+    return True
+
+
+def _find_batch_by_stem(conn: sqlite3.Connection, stem: str):
+    """同じバッチ名 (stem) の台帳行を探す。(path, detail) か None。
+
+    台帳はフルパス鍵・対局は '<stem>#' 鍵なので、同名ファイルを別の場所から
+    取り込むと両者の1:1対応が壊れる。取り込み前にここで検出する。"""
+    for p, detail_json in conn.execute(
+            "SELECT path, detail FROM source_files WHERE path LIKE ?",
+            (f"%{stem}.sfen",)):
+        if Path(p).stem != stem:
+            continue
+        try:
+            detail = json.loads(detail_json)
+        except (TypeError, ValueError):
+            continue
+        if detail.get("type") == "sfen":
+            return p, detail
+    return None
 
 
 def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
@@ -255,6 +278,28 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
     conn = open_for_write(db_path)
     try:
         status, detail = _detail_row(conn, path)
+        if detail is None:
+            # 同名バッチが別パスから登録済みか (ファイル移動 / 同名別物の検出)
+            moved = _find_batch_by_stem(conn, path.stem)
+            if moved is not None:
+                old_path, old_detail = moved
+                known = old_detail["lines"]
+                if (len(lines) >= known
+                        and _lines_hash(lines[:known]) == old_detail["sha256"]):
+                    # 既読部分が同一 → ファイル移動とみなし台帳を付け替える
+                    conn.execute("UPDATE source_files SET path=? WHERE path=?",
+                                 (str(path), old_path))
+                    detail = old_detail
+                    say(f"[{path.stem}] ファイルの移動を検出: "
+                        f"{old_path} → {path}")
+                else:
+                    result.conflict = True
+                    result.error = (
+                        f"同名バッチ ({path.stem}) が別の内容で登録済みです"
+                        f" ({old_path})。別の掘りなら .sfen をリネームするか、"
+                        "旧バッチを削除してから取り込んでください")
+                    say(f"[{path.stem}] {result.error}")
+                    return result
         fresh = True   # 新規/再構築 = 擬似対局から入れ直す
         if detail is not None:
             # --- 既知バッチ: 追記チェック (既読部分のハッシュを常に検証) ---
@@ -312,10 +357,10 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
             except (ValueError, KeyError, TypeError) as exc:
                 result.skipped.append(f"{game.lineno}行目: 再生失敗 ({exc})")
                 continue
-            _insert_game(conn, f"{path.stem}#L{game.lineno:05d}", date_str,
-                         label, game.initial_sfen, moves16, keys16,
-                         prefix_len, game.result, game.reason, touched)
-            result.added += 1
+            if _insert_game(conn, f"{path.stem}#L{game.lineno:05d}", date_str,
+                            label, game.initial_sfen, moves16, keys16,
+                            prefix_len, game.result, game.reason, touched):
+                result.added += 1
         _refresh_stats(conn, touched)
 
         st = path.stat()

@@ -854,9 +854,12 @@ class PrecedentViewer:
         paths = filedialog.askopenfilenames(
             title="掘り棋譜 (.sfen) を選択", parent=self._sfen_win,
             filetypes=[("sfen棋譜", "*.sfen"), ("All", "*")])
+        batches = list_batches(db) if Path(db).is_file() else []
         for p in paths:
-            known = Path(db).is_file() and any(
-                b["path"] == p for b in list_batches(db))
+            # パス一致だけでなくバッチ名一致も既知扱いにする (移動したファイルは
+            # ライブラリ側が台帳を付け替え、同名別内容なら拒否される)
+            stem = Path(p).stem
+            known = any(b["path"] == p or b["stem"] == stem for b in batches)
             if known:
                 self._enqueue_sfen_ingest(p, None, None)  # 追記は尋ねず自動
             else:
