@@ -2,8 +2,8 @@
 
 コンピュータ将棋の棋譜 (floodgate / WCSC / 電竜戦 / KIF) から前例データベースを
 構築し、局面 (sfen) から候補手と前例対局を高速検索するツール群。
-ShogiHomeにUSIエンジンとして登録して、検討中の局面の前例をリアルタイムに
-閲覧できる。依存は Python 3.10+ の標準ライブラリのみ。
+将棋盤GUI (USI対応) にエンジンとして登録して、検討中の局面の前例を
+リアルタイムに閲覧できる。依存は Python 3.10+ の標準ライブラリのみ。
 設計の詳細は [DESIGN.md](DESIGN.md)。
 
 ## 使い方
@@ -20,10 +20,10 @@ KiriCompassビューア (sfenを貼り付けて検索するGUI):
 python3 tools/precedent_gui.py csa.db
 ```
 
-ShogiHome連動 (USIダミーエンジン):
+将棋盤GUI連動 (USIダミーエンジン):
 
 ```bash
-# 登録用ラッパースクリプトを runtime/ に生成し、ShogiHomeの「エンジン追加」で選択する
+# 登録用ラッパースクリプトを runtime/ に生成し、将棋盤GUIの「エンジン追加」で選択する
 python3 tools/usi_engine.py --db csa.db --make-launcher
 ```
 
@@ -31,10 +31,10 @@ ShogiGUI・将棋所に登録する場合は出力をCP932にする (既定のUT
 日本語のinfo表示が文字化けする)。ランチャー生成時に `--encoding cp932` を
 付けるか、GUIのエンジン設定で `OutputEncoding` を `cp932` にする。
 
-ShogiHomeの検討モードで使うと、局面ごとに前例の候補手がmultipvで表示される
+検討モードで使うと、局面ごとに前例の候補手がmultipvで表示される
 (nodes列=出現局数、読み筋=最頻前例の続き。評価値は意味を持たないので常に0)。
 同時に閲覧中の局面がsyncファイル (`runtime/sync_position.json`) に書き出され、
-ビューアの「ShogiHome連動」をONにすると自動追従する。
+ビューアの「将棋盤GUIの局面を追従」(既定ON) が自動追従する。
 ランチャー・syncファイル・GUI設定などの実行時ファイルはすべて `runtime/` に入る。
 エンジン・ビューアはそれぞれ単体でも動く (連動は一方向・疎結合)。
 前例がない局面では `bestmove resign` を返す (定跡専用エンジンとして

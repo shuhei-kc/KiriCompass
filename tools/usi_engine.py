@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""前例DB USIエンジン: ShogiHome等のUSI GUIにダミーエンジンとして登録する。
+"""前例DB USIエンジン: 将棋盤GUI (USI対応) にダミーエンジンとして登録する。
 
 起動:
     python3 tools/usi_engine.py --db /path/to/csa.db
 
-ShogiHomeへの登録用ラッパースクリプト生成 (これを登録する。
+将棋盤GUIへの登録用ラッパースクリプト生成 (これを登録する。
 省略時は KC2/runtime/kifudb_engine.command に作られる):
     python3 tools/usi_engine.py --db /path/to/csa.db --make-launcher
 
@@ -54,7 +54,7 @@ def make_launcher(target: Path, args: argparse.Namespace) -> None:
         target.chmod(target.stat().st_mode
                      | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"ラッパースクリプトを作成しました: {target}")
-    print("ShogiHomeの「エンジン追加」でこのファイルを選択してください。")
+    print("将棋盤GUIの「エンジン追加」でこのファイルを選択してください。")
 
 
 def main() -> None:
@@ -67,7 +67,7 @@ def main() -> None:
     parser.add_argument("--encoding", choices=("utf-8", "cp932"),
                         default="utf-8",
                         help="GUIへの出力エンコーディング "
-                             "(ShogiHome=utf-8 / ShogiGUI・将棋所=cp932)")
+                             "(既定utf-8 / ShogiGUI・将棋所は cp932)")
     parser.add_argument("--log", default=None, help="デバッグログの書き出し先")
     parser.add_argument("--make-launcher", nargs="?", const=str(DEFAULT_LAUNCHER),
                         default=None, metavar="PATH",

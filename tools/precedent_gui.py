@@ -7,13 +7,13 @@
   いずれを貼り付けてもよい。手数部分は無視される。
 - 前例をダブルクリックすると棋譜ビューアをブラウザで開く (URLが無い前例は
   棋譜のクリップボードコピーにフォールバック)。
-  「棋譜コピー」ボタンは棋譜をクリップボードにコピーする。ShogiHomeの検討中
+  「棋譜コピー」ボタンは棋譜をクリップボードにコピーする。将棋盤GUIの検討中
   ウィンドウに Ctrl+V (⌘V) でそのまま貼り付けられる (元ファイルが残っていれば
   その内容を、なければDBから復元した棋譜を使う)。
   「ファイルで開く」ボタンは既定アプリで開く (新規ウィンドウ)。
 - 前例を選択すると、その局面での評価値と読み筋(記録があれば)を表示する。
-- 「ShogiHome連動」をONにすると、USIエンジン (tools/usi_engine.py) が
-  書き出すsyncファイルを追従して自動検索する。単体利用時はOFFのまま。
+- 「将棋盤GUIの局面を追従」(既定ON) は、USIエンジン (tools/usi_engine.py) が
+  書き出すsyncファイルを追従して自動検索する。単体利用時はOFFにしてよい。
 """
 
 import json
@@ -251,9 +251,9 @@ class PrecedentViewer:
         self.search_button = ttk.Button(top, text="検索", command=self.search)
         self.search_button.grid(row=1, column=2, pady=(6, 0))
 
-        self.sync_var = tk.BooleanVar(value=False)
+        self.sync_var = tk.BooleanVar(value=True)  # 既定で追従ON
         sync_check = ttk.Checkbutton(
-            top, text="ShogiHome連動 (USIエンジンの局面を追従)",
+            top, text="将棋盤GUIの局面を追従",
             variable=self.sync_var, command=self._on_sync_toggle)
         sync_check.grid(row=2, column=1, sticky=tk.W, padx=4, pady=(6, 0))
         top.columnconfigure(1, weight=1)
@@ -1248,7 +1248,7 @@ class PrecedentViewer:
         if p.url:
             lines.append(f"URL: {p.url}")
         lines.append("(ダブルクリック: 棋譜ビューアをブラウザで開く。"
-                     "「棋譜コピー」でShogiHome用にクリップボードへコピー)")
+                     "「棋譜コピー」で将棋盤GUI用にクリップボードへコピー)")
         self._set_detail("\n".join(lines))
 
     def _kifu_text(self, game_id: int) -> tuple[str, str]:
@@ -1271,7 +1271,7 @@ class PrecedentViewer:
         """ダブルクリック: 棋譜ビューアをブラウザで開く。
 
         URLを持たない前例 (棋譜ビューア非対応の大会等) の場合は、代わりに
-        棋譜をクリップボードへコピーする (ShogiHome用) フォールバックを行う。"""
+        棋譜をクリップボードへコピーする (将棋盤GUI用) フォールバックを行う。"""
         p = self._selected_precedent()
         if p is None:
             return
@@ -1284,7 +1284,7 @@ class PrecedentViewer:
     def _copy_kifu(self) -> None:
         """棋譜をクリップボードへコピーする。
 
-        ShogiHomeは検討中のウィンドウに Ctrl+V (⌘V) で貼り付けられる。
+        将棋盤GUIの検討中のウィンドウに Ctrl+V (⌘V) で貼り付けられる。
         ファイル関連付けで開くと必ず新しいウィンドウが立つため、
         同じウィンドウで続けるにはこの方式が最短。"""
         p = self._selected_precedent()
@@ -1295,7 +1295,7 @@ class PrecedentViewer:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
             self.status_var.set(
-                f"棋譜をコピーしました ({origin})。ShogiHomeで Ctrl+V / ⌘V で開けます。")
+                f"棋譜をコピーしました ({origin})。将棋盤GUIに Ctrl+V / ⌘V で貼り付けられます。")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("棋譜取得エラー", str(exc))
 
@@ -1409,9 +1409,10 @@ class PrecedentViewer:
         Path(path).write_text(report, encoding="utf-8")
         self.status_var.set(f"保存しました: {path}")
 
-    # -- ShogiHome sync ----------------------------------------------------
+    # -- 将棋盤GUIの局面追従 (sync) -----------------------------------------
 
     def _on_sync_toggle(self) -> None:
+        self._save_config()
         if self.sync_var.get():
             self._sync_mtime = None  # pick up the current position immediately
             self.status_var.set(f"連動待機中: {self._sync_file}")
@@ -1451,6 +1452,7 @@ class PrecedentViewer:
             self.db_var.set(config.get("db_path", ""))
             self.sfen_var.set(config.get("last_sfen", ""))
             self.auto_update_var.set(bool(config.get("floodgate_auto_update")))
+            self.sync_var.set(bool(config.get("sync_follow", True)))
             # 旧設定からの移行: 対象DB未設定なら当時のビューアDBを引き継ぐ
             self.fg_db_var.set(config.get("floodgate_db_path")
                                or config.get("db_path", ""))
@@ -1470,6 +1472,7 @@ class PrecedentViewer:
                 "db_path": self.db_var.get().strip(),
                 "last_sfen": self.sfen_var.get().strip(),
                 "floodgate_auto_update": self.auto_update_var.get(),
+                "sync_follow": self.sync_var.get(),
                 "floodgate_db_path": self.fg_db_var.get().strip(),
                 "private_db_path": self.private_db_var.get().strip(),
                 "sfen_db_path": self.sfen_db_var.get().strip()},

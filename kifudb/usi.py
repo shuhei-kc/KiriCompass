@@ -1,6 +1,6 @@
 """USI engine that answers from the precedent database.
 
-Register the launcher script in ShogiHome (or any USI GUI) and use it in
+Register the launcher script in a USI shogi GUI and use it in
 research (検討) mode: every position you navigate to is looked up in the
 database and the top precedent moves are reported as multipv info lines
 (move counts appear in the "nodes" column, scores are win rates mapped to
@@ -13,8 +13,8 @@ both programs stay independently usable).
 
 Behaviour without precedents: `info string 前例なし` and, when a bestmove
 is required, `bestmove resign`. For a book-only engine resigning is the
-honest signal that its knowledge is exhausted; in research mode ShogiHome
-effectively ignores bestmove, so nothing breaks either way.
+honest signal that its knowledge is exhausted; in research mode GUIs
+effectively ignore bestmove, so nothing breaks either way.
 """
 
 from __future__ import annotations
@@ -158,8 +158,8 @@ class PrecedentUsiEngine:
     def set_output_encoding(self, encoding: str) -> None:
         """info文字列の出力エンコーディングを切り替える。
 
-        ShogiHome はエンジン出力をUTF-8で読むが、ShogiGUI・将棋所 (日本語
-        Windows) はCP932を期待するため、日本語のinfo文字列が化ける。GUIの
+        エンジン出力をUTF-8で読むGUIと、CP932を期待するGUI (ShogiGUI・
+        将棋所など日本語Windows系) があり、合っていないと日本語が化ける。GUIの
         エンジン設定 (setoption OutputEncoding) か --encoding で合わせる。"""
         if encoding not in ("utf-8", "cp932"):
             return
