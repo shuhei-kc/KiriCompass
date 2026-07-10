@@ -52,11 +52,19 @@ ShogiGUI・将棋所に登録する場合は出力をCP932にする (既定のUT
 「知識が尽きた」ことを正直に伝える挙動。検討モードではbestmoveは実質無視される)。
 
 floodgateの新規棋譜を取り込む (cron等のヘッドレス運用向け。対局開始5〜10分前に
-実行できる毎時 :20/:50 起点を推奨。利用者全員が同一秒にサーバへ集中しないよう、
-ランダムな待ちを入れるのが行儀良い):
+実行できる毎時 :20/:50 起点を推奨。`--jitter 300` は開始前の0〜300秒の
+ランダムな待ちで、利用者全員が同一秒にサーバへ集中しないための行儀。
+DBが無ければ空で新規作成される):
 
 ```bash
-sleep $((RANDOM % 300)) && python3 tools/update_floodgate.py csa.db
+python3 tools/update_floodgate.py csa.db --jitter 300 --log floodgate.log
+```
+
+Windowsのタスクスケジューラなら、毎時 :20 と :50 の2本を登録する:
+
+```bat
+schtasks /create /tn "KiriCompass floodgate 20" /sc hourly /st 00:20 /tr "cmd /c cd /d C:\path\to\KC2 && py -3 tools\update_floodgate.py csa.db --jitter 300 --log floodgate.log"
+schtasks /create /tn "KiriCompass floodgate 50" /sc hourly /st 00:50 /tr "cmd /c cd /d C:\path\to\KC2 && py -3 tools\update_floodgate.py csa.db --jitter 300 --log floodgate.log"
 ```
 
 KiriCompassビューアの「DB更新...」ウィンドウでも同じことができる: フォルダ取り込みと、
