@@ -251,13 +251,9 @@ class PrecedentViewer:
         sync_check.grid(row=1, column=3, sticky=tk.W, padx=(6, 0), pady=(6, 0))
         top.columnconfigure(1, weight=1)
 
-        # DB行・SFEN行をボタンひとつで収納/展開 (ボタン自体は常時見える)
+        # DB行・SFEN行の収納対象 (トグルボタンは候補手右の切替ボタン群の上)
         self._top_collapsibles = list(top.grid_slaves())
         self._top_collapsed = False
-        self._collapse_btn = ttk.Button(top, text="▲", width=2,
-                                        command=self._toggle_top_rows)
-        self._collapse_btn.grid(row=0, column=4, rowspan=2,
-                                sticky=tk.NE, padx=(6, 0))
 
         panes = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -285,14 +281,18 @@ class PrecedentViewer:
                                     command=self.cand_tv.yview)
         self.cand_tv.configure(yscrollcommand=cand_scroll.set)
         cand_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        # 3系統DB (csa / private / .sfen) のワンクリック切替を候補手の右に
+        # 候補手の右: 上段に DB行/SFEN行 の収納トグル、少し空けて 3系統DB切替
         switch = ttk.Frame(cand_holder)
         switch.pack(side=tk.LEFT, anchor=tk.N, padx=(10, 0), pady=4)
-        for text_, kind in (("csa", "public"), ("private", "private"),
-                            (".sfen", "sfen")):
+        self._collapse_btn = ttk.Button(switch, text="▲", width=7,
+                                        command=self._toggle_top_rows)
+        self._collapse_btn.pack(fill=tk.X)
+        for i, (text_, kind) in enumerate((("csa", "public"),
+                                           ("private", "private"),
+                                           (".sfen", "sfen"))):
             ttk.Button(switch, text=text_, width=7,
                        command=lambda k=kind: self._switch_db(k)).pack(
-                fill=tk.X, pady=1)
+                fill=tk.X, pady=(12, 1) if i == 0 else 1)
         panes.add(cand_holder, weight=1)
 
         prec_frame = ttk.LabelFrame(panes, text="前例")
