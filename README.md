@@ -20,7 +20,9 @@ DBを使う場合は絶対パスか、`./csa.db`・`path/to/csa.db` のように
 ディレクトリ付きで指定する。
 
 KiriCompassビューア (sfenを貼り付けて検索するGUI) — **KiriCompass.command**
-(macOS) / **KiriCompass.bat** (Windows) のダブルクリック、またはCLIから:
+(macOS) / **KiriCompass.bat** (Windows) のダブルクリック、またはCLIから。
+GUIは Python 3.10 以上必須 (macOS同梱の3.9はtkinterがクリックを取りこぼす
+不具合があり起動を拒否する。.command は 3.10+ を自動で探す):
 
 ```bash
 python3 tools/precedent_gui.py csa.db
