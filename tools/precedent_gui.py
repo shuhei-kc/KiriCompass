@@ -1642,12 +1642,20 @@ class PrecedentViewer:
 
 def main() -> None:
     # macOS同梱の 3.9 (Tk 8.5) はクリックを取りこぼす既知の不具合があり、
-    # GUIとしては使いものにならないため起動を拒否する (KiriCompass.command
-    # は3.10+を自動で探すので、通常ここには来ない)。
+    # GUIとしては使いものにならないため起動を拒否する (KiriCompass.app は
+    # 3.10+を自動で探すので、通常ここには来ない)。.app経由だとstderrが
+    # 見えないため、可能ならダイアログでも通知する。
     if sys.version_info < (3, 10):
-        sys.exit(f"KiriCompassのGUIには Python 3.10 以上が必要です "
-                 f"(現在: {sys.version.split()[0]})。macOS同梱の 3.9 は "
-                 "tkinter (Tk 8.5) にクリック取りこぼしの不具合があります。")
+        message = (f"KiriCompassのGUIには Python 3.10 以上が必要です "
+                   f"(現在: {sys.version.split()[0]})。macOS同梱の 3.9 は "
+                   "tkinter (Tk 8.5) にクリック取りこぼしの不具合があります。")
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("KiriCompass", message)
+        except Exception:  # noqa: BLE001 - 表示できなければstderrのみ
+            pass
+        sys.exit(message)
     setup_dpi_awareness()
     root = tk.Tk()
     PrecedentViewer(root)

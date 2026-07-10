@@ -1,0 +1,42 @@
+#!/bin/sh
+# KiriCompass.app 本体: Terminalを開かずに前例ビューアを起動する。
+# この実行体は KC2/KiriCompass.app/Contents/MacOS/ にあるので、
+# リポジトリルートは3階層上。位置基準の解決なのでcloneをどこに置いても動く。
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)" || exit 1
+cd "$ROOT" || exit 1
+
+# 3.10以上の python3 を使う (macOS同梱3.9のTk8.5はクリック取りこぼしの
+# 不具合があるため不可)。バージョン確認のサブプロセス起動を毎回全候補に
+# 行うと遅いので、前回の当たりを runtime/gui_python にキャッシュし、
+# 起動時はその1本だけ検証する (無効になっていれば再探索)。
+CACHE="$ROOT/runtime/gui_python"
+usable() {
+    [ -n "$1" ] && [ -x "$1" ] && "$1" -c \
+        'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+        2>/dev/null
+}
+
+PY=""
+if [ -r "$CACHE" ]; then
+    CANDIDATE="$(cat "$CACHE")"
+    usable "$CANDIDATE" && PY="$CANDIDATE"
+fi
+if [ -z "$PY" ]; then
+    for p in /opt/homebrew/bin/python3 /usr/local/bin/python3 \
+             /Library/Frameworks/Python.framework/Versions/*/bin/python3 \
+             python3; do
+        FOUND="$(command -v "$p" 2>/dev/null)" || continue
+        if usable "$FOUND"; then
+            PY="$FOUND"
+            break
+        fi
+    done
+    if [ -z "$PY" ]; then
+        osascript -e 'display alert "KiriCompass" message "Python 3.10以上が見つかりません。python.org または Homebrew からインストールしてください。"' >/dev/null 2>&1
+        exit 1
+    fi
+    mkdir -p "$ROOT/runtime" 2>/dev/null
+    printf '%s\n' "$PY" > "$CACHE" 2>/dev/null
+fi
+
+exec "$PY" tools/precedent_gui.py "$@"
