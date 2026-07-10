@@ -191,6 +191,7 @@ class PrecedentViewer:
         self._auto_jitter = random.randint(0, AUTO_UPDATE_JITTER)  # 群れ分散
         self._update_win: tk.Toplevel | None = None
         self._update_log_lines: list[str] = []  # ウィンドウ再表示用の履歴
+        self._name_db_query: str | None = None  # DB側に適用中の名前フィルタ
 
         self._setup_fonts()
         self._build_widgets()
@@ -302,8 +303,14 @@ class PrecedentViewer:
         self.name_filter_var = tk.StringVar()
         self.name_filter_var.trace_add(
             "write", lambda *_args: self._apply_name_filter())
-        ttk.Entry(prec_header, textvariable=self.name_filter_var,
-                  width=16).pack(side=tk.LEFT, padx=(6, 0))
+        name_entry = ttk.Entry(prec_header, textvariable=self.name_filter_var,
+                               width=16)
+        name_entry.pack(side=tk.LEFT, padx=(6, 0))
+        name_entry.bind("<Return>", lambda _e: self._search_names_in_db())
+        # 逐次絞り込みは取得済みページ内のみ。深くに埋もれた名前はDB全体を走査
+        ttk.Button(prec_header, text="DB検索", width=7,
+                   command=self._search_names_in_db).pack(
+            side=tk.LEFT, padx=(2, 0))
         prec_frame = ttk.LabelFrame(panes, labelwidget=prec_header)
 
         # 出典フィルタ。切り替えるとDBから絞り込み条件付きで1ページ取り直す
@@ -427,10 +434,12 @@ class PrecedentViewer:
         self.status_var.set("検索中...")
         # フィルタ状態は tk 変数なのでメインスレッドで読み取って渡す
         threading.Thread(target=self._search_task,
-                         args=(db_path, sfen, self._enabled_sources()),
+                         args=(db_path, sfen, self._enabled_sources(),
+                               self._name_db_query),
                          daemon=True).start()
 
-    def _search_task(self, db_path: str, sfen: str, sources) -> None:
+    def _search_task(self, db_path: str, sfen: str, sources,
+                     name_query=None) -> None:
         try:
             sfen_main = normalize_sfen_main(sfen)
             position = Position()
@@ -442,7 +451,8 @@ class PrecedentViewer:
             if sources is not None:
                 self._wait_interval_prep(db_path)
             precedents = reader.precedents_page(sfen, limit=PAGE_SIZE,
-                                                sources=sources)
+                                                sources=sources,
+                                                name_query=name_query)
             confluence = reader.confluence_counts(sfen, candidates)
             transpositions = reader.transposition_moves(sfen, candidates)
             elapsed = (time.perf_counter() - started) * 1000
@@ -1164,10 +1174,12 @@ class PrecedentViewer:
         if not db_path or not sfen:
             return
         sources = self._enabled_sources()
+        name_query = self._name_db_query
         self._search_running = True
         self.search_button.config(state=tk.DISABLED)
         self.more_button.config(state=tk.DISABLED)
-        self.status_var.set("絞り込みを反映中...")
+        self.status_var.set("名前でDB検索中..." if name_query
+                            else "絞り込みを反映中...")
 
         def task():
             try:
@@ -1175,7 +1187,8 @@ class PrecedentViewer:
                 if sources is not None:
                     self._wait_interval_prep(db_path)
                 page = self._get_reader(db_path).precedents_page(
-                    sfen, limit=PAGE_SIZE, sources=sources)
+                    sfen, limit=PAGE_SIZE, sources=sources,
+                    name_query=name_query)
                 elapsed = (time.perf_counter() - started) * 1000
                 self.root.after(0, self._show_refetch, page, sources, elapsed)
             except Exception as exc:  # noqa: BLE001
@@ -1207,6 +1220,19 @@ class PrecedentViewer:
             REASON_JA.get(p.end_reason, p.end_reason),
             p.ply_count, p.source))
 
+    def _search_names_in_db(self) -> None:
+        """名前フィルタをDB全体に適用して前例ページを取り直す。
+
+        テキスト欄の逐次絞り込みは取得済みページ内しか見えないため、初期局面の
+        ように前例が多い局面では一致が深くに埋もれ得る。このボタンはDB側で
+        名前条件付きの走査を行う (レアな名前×前例100万局で数秒程度)。
+        空欄で押す (または欄を空にする) と解除され、通常のページに戻る。
+        出典フィルタ・「さらに表示」とも合成される。"""
+        if self.query_position is None or self._search_running:
+            return
+        self._name_db_query = self.name_filter_var.get().strip() or None
+        self._refetch_precedents()
+
     def _name_matches(self, p) -> bool:
         """名前フィルタ (大文字小文字を無視した部分一致) に合致するか。"""
         query = self.name_filter_var.get().strip().lower()
@@ -1217,7 +1243,13 @@ class PrecedentViewer:
         """名前フィルタの変更のたびに、ロード済みの前例一覧を書き換える。
 
         DBへは再問い合わせしない (取得済み1000件単位の中を絞り込む)。
-        No. は取得時の順位のまま表示する。"""
+        No. は取得時の順位のまま表示する。「DB検索」でDB側フィルタを適用中に
+        欄を空にしたら、フィルタ無しのページを取り直す。"""
+        if (not self.name_filter_var.get().strip()
+                and self._name_db_query and not self._search_running):
+            self._name_db_query = None
+            self._refetch_precedents()
+            return
         self.prec_tv.delete(*self.prec_tv.get_children())
         shown = 0
         for index, p in enumerate(self.precedents):
@@ -1262,7 +1294,8 @@ class PrecedentViewer:
                     self._wait_interval_prep(db_path)
                 page = self._get_reader(db_path).precedents_page(
                     sfen, limit=PAGE_SIZE, before=before,
-                    sources=sources, start_rank=start_rank)
+                    sources=sources, start_rank=start_rank,
+                    name_query=self._name_db_query)
                 self.root.after(0, self._show_more, page, sources)
             except Exception as exc:  # noqa: BLE001
                 self.root.after(0, self._show_error, str(exc))

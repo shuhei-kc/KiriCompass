@@ -374,7 +374,8 @@ class PrecedentReader:
     def precedents_page(self, sfen: str, limit: int = DEFAULT_PAGE_SIZE,
                         before: tuple[int, int] | None = None,
                         sources: "set[str] | None" = None,
-                        start_rank: int = 0) -> "list[Precedent]":
+                        start_rank: int = 0,
+                        name_query: str | None = None) -> "list[Precedent]":
         """One page of precedents, newest first.
 
         The date lives inside the position_games primary key, so this is a
@@ -391,6 +392,10 @@ class PrecedentReader:
         速度はほぼ変わらない。rank は「現在の絞り込み条件での」新しい順の
         通し番号 (絞り込み無しなら全体順位)。`start_rank` は続き取得時に
         前ページ最終行の rank を渡す。
+
+        `name_query`: 対局者名の部分一致 (ASCIIは大文字小文字を無視) で
+        絞り込む。名前は games 側にあるため走査中の結合が必要になり、
+        レアな名前×前例の多い局面では数秒かかることがある。
         """
         key = position_key_from_sfen(normalize_sfen_main(sfen))
         condition, params = "", [key]
@@ -398,6 +403,13 @@ class PrecedentReader:
             condition = ("AND (pg.sort_key < ? OR "
                          "(pg.sort_key = ? AND pg.game_id < ?)) ")
             params += [before[0], before[0], before[1]]
+        if name_query:
+            escaped = (name_query.replace("\\", "\\\\")
+                       .replace("%", "\\%").replace("_", "\\_"))
+            pattern = f"%{escaped}%"
+            condition += ("AND (g.black_name LIKE ? ESCAPE '\\' "
+                          "OR g.white_name LIKE ? ESCAPE '\\') ")
+            params += [pattern, pattern]
         if sources is not None:
             try:
                 condition += self._source_condition(sources)
