@@ -80,11 +80,11 @@ CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
 # floodgate逐次更新の一時保存フォルダ (取り込み後に削除される。詳細は
 # kifudb/floodgate.py)。未終局・エラーのファイルだけが一時的に残る。
 FLOODGATE_MIRROR = Path(__file__).resolve().parent.parent / "data" / "floodgate"
-# 自動更新の実行タイミング: 毎時この分を窓の開始とし、ジッタ秒を足して実行
-# (対局開始 :00/:30 の5分前)。全利用者が同一秒にwdoorへ殺到しないよう、
-# 起動ごとのランダムなずれ (0〜AUTO_UPDATE_JITTER秒) で分散させる。
-AUTO_UPDATE_MINUTES = (25, 55)
-AUTO_UPDATE_JITTER = 180
+# 自動更新の実行タイミング: 毎時この分を窓の開始とし、ジッタ秒を足して実行。
+# :20/:50 + 0〜300秒 = 対局開始 (:00/:30) の5〜10分前のどこか。全利用者が
+# 同一秒にwdoorへ殺到しないよう、起動ごとのランダムなずれで分散させる。
+AUTO_UPDATE_MINUTES = (20, 50)
+AUTO_UPDATE_JITTER = 300
 # 島表 (出典→game_id区間) の永続キャッシュ。DBが変わらない限り起動時の
 # 再計算 (gamesテーブル全走査) を丸ごと省ける。
 INTERVALS_CACHE_PATH = RUNTIME_DIR / "source_intervals.json"
@@ -694,8 +694,8 @@ class PrecedentViewer:
         minutes = "/".join(f":{m:02d}" for m in AUTO_UPDATE_MINUTES)
         ttk.Checkbutton(
             fg_frame,
-            text=f"毎時 {minutes} 過ぎに新規棋譜を自動取り込み"
-                 " (対局開始前。混雑回避のため数分内でランダムにずらす)",
+            text="対局開始の5〜10分前に新規棋譜を自動取得"
+                 f" (毎時 {minutes} から数分ずらして実行)",
             variable=self.auto_update_var,
             command=self._on_auto_update_toggle).pack(anchor=tk.W)
         row = ttk.Frame(fg_frame)
