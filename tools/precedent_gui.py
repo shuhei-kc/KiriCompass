@@ -228,8 +228,6 @@ class PrecedentViewer:
         ttk.Entry(top, textvariable=self.db_var).grid(
             row=0, column=1, sticky=tk.EW, padx=4)
         ttk.Button(top, text="参照...", command=self._browse_db).grid(row=0, column=2)
-        ttk.Button(top, text="DB更新...", command=self._open_update_window).grid(
-            row=0, column=3, padx=(4, 0))
         self.auto_update_var = tk.BooleanVar(value=False)
         self.sfen_db_var = tk.StringVar(value=str(DEFAULT_SFEN_DB))
         # floodgate更新・公開棋譜の取り込み先DB。ビューアの表示DBに追従させると
@@ -289,12 +287,15 @@ class PrecedentViewer:
         # 候補手の右: 3系統DB切替。DB行/SFEN行の収納トグルはウィンドウ右端。
         switch = ttk.Frame(cand_holder)
         switch.pack(side=tk.LEFT, anchor=tk.N, padx=(10, 0), pady=4)
+        ttk.Button(switch, text="DB更新...", width=9,
+                   command=self._open_update_window).pack(fill=tk.X)
         self._db_switch_buttons: dict[str, ttk.Button] = {}
-        for text_, kind in (("csa", "public"), ("private", "private"),
-                            (".sfen", "sfen")):
+        for i, (text_, kind) in enumerate((("csa", "public"),
+                                           ("private", "private"),
+                                           (".sfen", "sfen"))):
             btn = ttk.Button(switch, text=text_, width=9,
                              command=lambda k=kind: self._switch_db(k))
-            btn.pack(fill=tk.X, pady=1)
+            btn.pack(fill=tk.X, pady=(12, 1) if i == 0 else 1)
             self._db_switch_buttons[kind] = btn
         # 選択中のDBをボタンの ● 印で示す (パス編集にも追従)
         for var in (self.db_var, self.fg_db_var, self.private_db_var,
