@@ -68,14 +68,38 @@ class UpdateResult:
         return " / ".join(parts)
 
 
+# CA証明書バンドルのよくある場所 (python.org版PythonはOSの証明書ストアを
+# 見ないため、既定コンテキストのCAが空になる環境がある)
+_CA_BUNDLE_CANDIDATES = (
+    "/etc/ssl/cert.pem",                    # macOS (LibreSSL同梱)
+    "/etc/ssl/certs/ca-certificates.crt",   # Debian/Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",     # RHEL系
+)
+
+
 def _ssl_context() -> ssl.SSLContext:
-    """certifi があればそのCA束を使う (macOSのpython.org版などで、システム
-    証明書が urllib から見えない環境への配慮)。無ければシステム既定。"""
+    """TLS検証に使うコンテキストを、環境に応じて多段フォールバックで作る。
+
+    certifi → 既定ストア (CAが実際に入っている場合のみ) → OS標準のバンドル
+    ファイル → 最後の手段として検証なし (明示的に警告を出す)。配布先で
+    「Install Certificates.command を実行してください」と言わずに済ませる。"""
     try:
         import certifi
         return ssl.create_default_context(cafile=certifi.where())
     except ImportError:
-        return ssl.create_default_context()
+        pass
+    context = ssl.create_default_context()
+    if context.cert_store_stats().get("x509_ca", 0):
+        return context
+    for cafile in _CA_BUNDLE_CANDIDATES:
+        if Path(cafile).is_file():
+            try:
+                return ssl.create_default_context(cafile=cafile)
+            except ssl.SSLError:
+                continue
+    log.warning("CA証明書ストアが見つからないため、TLS検証なしで接続します "
+                "(pip install certifi で検証を有効にできます)")
+    return ssl._create_unverified_context()  # noqa: SLF001
 
 
 _SSL_CTX = _ssl_context()
