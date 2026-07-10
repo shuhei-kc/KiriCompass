@@ -173,11 +173,13 @@ class IngestStats:
 def ingest_folder(db_path: str | Path, folder: str | Path,
                   batch_size: int = 500,
                   pv_max_moves: int = 255,
-                  progress=None) -> IngestStats:
+                  progress=None, file_filter=None) -> IngestStats:
     """Scan `folder` recursively and add finished games not yet in the DB.
 
     Safe to re-run: unchanged files are skipped via the source_files ledger,
     unfinished/errored files are retried once their size or mtime changes.
+    `file_filter(path)` を渡すと True のファイルだけを対象にする
+    (公開/プライベートの振り分け取り込みに使う)。
     """
     folder = Path(folder)
     conn = open_for_write(db_path)
@@ -191,7 +193,8 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
         log.info("migrated %d games: source 'wdoor' -> 'floodgate'", migrated)
 
     files = sorted(p for p in folder.rglob("*")
-                   if p.suffix.lower() in KIFU_SUFFIXES and p.is_file())
+                   if p.suffix.lower() in KIFU_SUFFIXES and p.is_file()
+                   and (file_filter is None or file_filter(p)))
     total = len(files)
     log.info("found %d kifu files under %s", total, folder)
 
