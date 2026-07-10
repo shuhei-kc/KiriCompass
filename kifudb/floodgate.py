@@ -122,6 +122,18 @@ def _http_get(url: str, since_mtime: float | None = None) -> bytes | None:
         raise
 
 
+def _write_atomic(dest: Path, data: bytes) -> None:
+    """一時ファイル経由で書いてからリネームする (原子的)。
+
+    直接書くと、書き込み途中でプロセスが落ちたときに切断されたCSAが残り、
+    しかもローカルmtimeが新しいため If-Modified-Since が304を返し続けて
+    永久に修復されない。tmp経由なら中断してもdestは生まれず、次サイクルの
+    「ローカルに無い」判定で取り直される。"""
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+
+
 def list_day(day: date) -> list[str]:
     """日別インデックスから .csa ファイル名を列挙する (無い日は空リスト)。"""
     data = _http_get(f"{BASE_URL}/{day:%Y/%m/%d}/")
@@ -149,6 +161,8 @@ def update_once(db_path: str | Path, mirror_dir: str | Path,
     """
     mirror = Path(mirror_dir)
     mirror.mkdir(parents=True, exist_ok=True)
+    for stale in mirror.glob("*.tmp"):  # 中断された書き込みの残骸を掃除
+        stale.unlink(missing_ok=True)
     result = UpdateResult()
 
     def say(message: str) -> None:
@@ -189,7 +203,7 @@ def update_once(db_path: str | Path, mirror_dir: str | Path,
                     continue
                 if data is None:
                     continue
-                dest.write_bytes(data)
+                _write_atomic(dest, data)
                 result.downloaded += 1
                 time.sleep(DOWNLOAD_SLEEP)
 
@@ -210,7 +224,7 @@ def update_once(db_path: str | Path, mirror_dir: str | Path,
                 say(f"再取得失敗 {p.name}: {exc}")
                 continue
             if data is not None:
-                p.write_bytes(data)  # mtime更新 → 台帳が自動的に再取り込み
+                _write_atomic(p, data)  # mtime更新 → 台帳が自動的に再取り込み
                 result.refreshed += 1
                 time.sleep(DOWNLOAD_SLEEP)
 
