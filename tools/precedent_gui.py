@@ -1649,12 +1649,15 @@ def main() -> None:
         message = (f"KiriCompassのGUIには Python 3.10 以上が必要です "
                    f"(現在: {sys.version.split()[0]})。macOS同梱の 3.9 は "
                    "tkinter (Tk 8.5) にクリック取りこぼしの不具合があります。")
-        try:
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showerror("KiriCompass", message)
-        except Exception:  # noqa: BLE001 - 表示できなければstderrのみ
-            pass
+        # pythonw (Windows) はstderrが見えないためダイアログでも通知する。
+        # macOSの3.9は Tk 生成自体がabortし得るので試みない (stderrに出す)。
+        if sys.platform == "win32":
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                messagebox.showerror("KiriCompass", message)
+            except Exception:  # noqa: BLE001 - 表示できなければstderrのみ
+                pass
         sys.exit(message)
     setup_dpi_awareness()
     root = tk.Tk()
