@@ -497,6 +497,32 @@ def compute_source_intervals(db_path: str | Path, progress=None,
         conn.close()
 
 
+def extend_source_intervals(db_path: str | Path, intervals,
+                            since_gid: int):
+    """島表を差分更新する: since_gid より後の対局だけ走査してマージする。
+
+    逐次更新のたびに compute_source_intervals の全走査をやり直さないための
+    補助。intervals は game_id 昇順で並んでいること (compute_source_intervals
+    と本関数の出力はこれを満たす)。戻り値 (new_intervals, new_max_gid, added)。
+    """
+    conn = open_read_only(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT game_id, source FROM games WHERE game_id > ? "
+            "ORDER BY game_id", (since_gid,)).fetchall()
+    finally:
+        conn.close()
+    intervals = list(intervals)
+    if not rows:
+        return intervals, since_gid, 0
+    for gid, src in rows:
+        if intervals and intervals[-1][0] == src and intervals[-1][2] == gid - 1:
+            intervals[-1] = (src, intervals[-1][1], gid)
+        else:
+            intervals.append((src, gid, gid))
+    return intervals, rows[-1][0], len(rows)
+
+
 def lookup(db_path: str | Path, sfen: str,
            max_precedents: int = DEFAULT_PAGE_SIZE):
     """One-shot variant of PrecedentReader.lookup (opens/closes per call)."""
