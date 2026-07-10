@@ -233,6 +233,13 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
         log.info("recovered dates for %d undated tournament game(s) "
                  "from sibling games", backfilled)
     conn.commit()
+    # WALを本体へ畳み、-wal/-shm をほぼ空に戻す。残った -wal をユーザが
+    # 手で消して直近の取り込みを失う事故を防ぐ。読み取り接続が同時に
+    # 開いているときは畳める分だけ畳む (ベストエフォート、次回に持ち越し)。
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError:
+        pass
     conn.close()
     log.info("done in %.1fs: %s", time.time() - started, stats.summary())
     return stats
