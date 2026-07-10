@@ -2,15 +2,15 @@
 """前例DB USIエンジン: ShogiHome等のUSI GUIにダミーエンジンとして登録する。
 
 起動:
-    python3 tools/usi_engine.py --db /path/to/precedents.db
+    python3 tools/usi_engine.py --db /path/to/csa.db
 
 ShogiHomeへの登録用ラッパースクリプト生成 (これを登録する。
 省略時は KC2/runtime/kifudb_engine.command に作られる):
-    python3 tools/usi_engine.py --db /path/to/precedents.db --make-launcher
+    python3 tools/usi_engine.py --db /path/to/csa.db --make-launcher
 
 検討モードで使うと、局面ごとに前例の候補手がmultipvで表示され
 (nodes列=出現局数、評価値=手番側の勝率換算)、閲覧中の局面が
-syncファイルに書き出されて前例ビューアが追従できる。
+syncファイルに書き出されてKiriCompassビューアが追従できる。
 """
 
 import argparse
@@ -61,7 +61,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="", help="前例DBのパス")
     parser.add_argument("--sync-file", default=str(DEFAULT_SYNC_FILE),
-                        help="閲覧中局面の書き出し先 (前例ビューアが追従)")
+                        help="閲覧中局面の書き出し先 (ビューアが追従)")
     parser.add_argument("--multipv", type=int, default=8)
     parser.add_argument("--pv-depth", type=int, default=12)
     parser.add_argument("--encoding", choices=("utf-8", "cp932"),

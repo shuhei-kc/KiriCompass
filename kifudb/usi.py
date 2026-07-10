@@ -33,7 +33,7 @@ from .query import PrecedentReader
 RUNTIME_DIR = Path(__file__).resolve().parent.parent / "runtime"
 DEFAULT_SYNC_FILE = RUNTIME_DIR / "sync_position.json"
 
-ENGINE_NAME = "KifuDB Precedents"
+ENGINE_NAME = "KiriCompass"
 ENGINE_AUTHOR = "478"
 
 

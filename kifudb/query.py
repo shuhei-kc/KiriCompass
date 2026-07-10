@@ -25,7 +25,7 @@ REASON_JA = {
     "chudan": "中断", "matta": "待った", "uchifuzume": "打ち歩詰め",
     "oute_kaihimore": "王手放置", "tsumi": "詰み", "fuzumi": "不詰",
     "error": "エラー", "abnormal": "異常終了",
-    # たややん掘り (.sfen) の擬似対局: 課題局面までの共通手順 (sfen_ingest.py)
+    # .sfen連続対局の擬似対局: 課題局面までの共通手順 (sfen_ingest.py)
     "task": "課題局面",
 }
 
@@ -173,7 +173,7 @@ def tournament_label(source: str, event: str) -> str:
             return f"WCSO{num}" if kind == "wcso" else f"WCSC{num}"
         return prefix
     if source == "sfen":
-        # 掘り棋譜はバッチ名 (event = '<バッチ名>#L0001' 等) を大会名扱いに
+        # .sfen連続対局はバッチ名 (event = '<バッチ名>#L0001' 等) を大会名扱いに
         return event.split("#", 1)[0]
     return source
 

@@ -83,7 +83,7 @@ CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
 # floodgate逐次更新の一時保存フォルダ (取り込み後に削除される。詳細は
 # kifudb/floodgate.py)。未終局・エラーのファイルだけが一時的に残る。
 FLOODGATE_MIRROR = Path(__file__).resolve().parent.parent / "data" / "floodgate"
-# 掘り棋譜 (.sfen) 専用DBの既定パス。実対局の前例DBとは分けて管理する
+# .sfen 連続対局 (水匠定跡生成の出力) 専用DBの既定パス。実対局の前例DBとは分けて管理する
 # (統計の意味が異なる上、バッチ削除の誤爆半径を隔離するため)。
 DEFAULT_SFEN_DB = Path(__file__).resolve().parent.parent / "data" / "sfen.db"
 # 個人入手棋譜 (公開されていない csa/kif) の既定DB。誰でも入手できる公開棋譜
@@ -169,7 +169,7 @@ def load_post_template() -> str:
 class PrecedentViewer:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        root.title("前例ビューア (kifudb)")
+        root.title("KiriCompass")
         root.geometry("900x810")
 
         self.precedents = []
@@ -190,7 +190,6 @@ class PrecedentViewer:
         self._auto_update_after: str | None = None  # スケジューラのafter ID
         self._auto_jitter = random.randint(0, AUTO_UPDATE_JITTER)  # 群れ分散
         self._update_win: tk.Toplevel | None = None
-        self._sfen_win: tk.Toplevel | None = None
         self._update_log_lines: list[str] = []  # ウィンドウ再表示用の履歴
 
         self._setup_fonts()
@@ -228,12 +227,18 @@ class PrecedentViewer:
         ttk.Button(top, text="参照...", command=self._browse_db).grid(row=0, column=2)
         ttk.Button(top, text="DB更新...", command=self._open_update_window).grid(
             row=0, column=3, padx=(4, 0))
-        ttk.Button(top, text="掘り棋譜...", command=self._open_sfen_window).grid(
-            row=0, column=4, padx=(4, 0))
+        # 3系統DB (公開csa / private / .sfen) のワンクリック切替
+        switch = ttk.Frame(top)
+        switch.grid(row=0, column=4, padx=(8, 0))
+        for text_, kind in (("csa", "public"), ("private", "private"),
+                            (".sfen", "sfen")):
+            ttk.Button(switch, text=text_, width=6,
+                       command=lambda k=kind: self._switch_db(k)).pack(
+                side=tk.LEFT, padx=1)
         self.auto_update_var = tk.BooleanVar(value=False)
         self.sfen_db_var = tk.StringVar(value=str(DEFAULT_SFEN_DB))
         # floodgate更新・公開棋譜の取り込み先DB。ビューアの表示DBに追従させると
-        # 掘り棋譜DB等を開いている間の自動サイクルが誤爆するため、固定で持つ。
+        # .sfen DB等を開いている間の自動サイクルが誤爆するため、固定で持つ。
         self.fg_db_var = tk.StringVar(value="")
         self.private_db_var = tk.StringVar(value=str(DEFAULT_PRIVATE_DB))
 
@@ -558,12 +563,32 @@ class PrecedentViewer:
                 self._db_job_running = None
                 self.root.after(0, self._set_update_status)
 
+    def _switch_db(self, kind: str) -> None:
+        """csa.db / private.db / sfen.db をワンクリックで切り替える。
+
+        切り替え時は出典フィルタを全てONに戻し、現在のsfenで表示を更新する。"""
+        var = {"public": self.fg_db_var, "private": self.private_db_var,
+               "sfen": self.sfen_db_var}[kind]
+        db_path = var.get().strip()
+        if not db_path or not Path(db_path).is_file():
+            messagebox.showerror(
+                "エラー", f"切り替え先のDBがありません: {db_path or '(未設定)'}\n"
+                          "「DB更新...」ウィンドウでパスを設定してください。",
+                parent=self.root)
+            return
+        self.db_var.set(db_path)
+        for filter_var in self.source_filter_vars.values():
+            filter_var.set(True)
+        self._prime_source_intervals()
+        if self.sfen_var.get().strip() and not self._search_running:
+            self.search()
+
     def _dialog_parent(self):
         return (self._update_win if self._update_win is not None
                 and self._update_win.winfo_exists() else self.root)
 
     def _db_has_sfen_games(self, db_path: str) -> bool:
-        """DBに掘り棋譜 (source='sfen') が入っているか。"""
+        """.sfen連続対局 (source='sfen') が入っているか。"""
         try:
             conn = open_read_only(db_path)
             try:
@@ -587,7 +612,7 @@ class PrecedentViewer:
                     parent=self._dialog_parent())
             return None
         if self._db_has_sfen_games(db_path):
-            message = ("対象DBに掘り棋譜 (sfen) が入っています。floodgateの"
+            message = ("対象DBに.sfen連続対局が入っています。floodgateの"
                        "取り込み先は実対局の前例DBにしてください")
             if quiet:
                 self._ulog(f"[floodgate] {message} のためスキップ")
@@ -627,7 +652,7 @@ class PrecedentViewer:
         private_db = self.private_db_var.get().strip() or str(DEFAULT_PRIVATE_DB)
         if self._db_has_sfen_games(private_db):
             messagebox.showerror(
-                "エラー", "プライベートDBに掘り棋譜 (sfen) が入っています。"
+                "エラー", "プライベートDBに.sfen連続対局が入っています。"
                           "別のパスを指定してください。",
                 parent=self._dialog_parent())
             return
@@ -749,7 +774,7 @@ class PrecedentViewer:
             return
         win = tk.Toplevel(self.root)
         win.title("DB更新")
-        win.geometry("680x480")
+        win.geometry("700x820")
         self._update_win = win
 
         db_frame = ttk.LabelFrame(win, text="取り込み先", padding=8)
@@ -774,11 +799,12 @@ class PrecedentViewer:
 
         db_row("公開前例DB:", self.fg_db_var, "公開前例DBを選択")
         db_row("プライベートDB:", self.private_db_var, "プライベートDBを選択")
+        db_row(".sfen DB:", self.sfen_db_var, ".sfen 専用DBを選択")
         ttk.Label(db_frame, foreground="gray", wraplength=630, justify=tk.LEFT,
                   text="公開前例DB = 誰でも入手できる棋譜 (floodgate/WCSC/電竜戦)。"
                        "配布・共有できる状態を保つため、個人入手の棋譜は"
-                       "プライベートDBへ自動で振り分けられる。").pack(
-            anchor=tk.W, pady=(4, 0))
+                       "プライベートDBへ、.sfen連続対局は .sfen DBへ入り、"
+                       "互いに混ざらない。").pack(anchor=tk.W, pady=(4, 0))
 
         folder_frame = ttk.LabelFrame(win, text="フォルダ取り込み", padding=8)
         folder_frame.pack(fill=tk.X, padx=8, pady=4)
@@ -822,10 +848,52 @@ class PrecedentViewer:
                   foreground="gray", wraplength=620, justify=tk.LEFT).pack(
             anchor=tk.W, pady=(6, 0))
 
+        # --- .sfen 連続対局 (専用DBへ。他の取り込み先とは混ざらない) ---
+        sfen_frame = ttk.LabelFrame(win, text=".sfen 連続対局 (.sfen DBへ)",
+                                    padding=8)
+        sfen_frame.pack(fill=tk.BOTH, expand=False, padx=8, pady=4)
+        sfen_buttons = ttk.Frame(sfen_frame)
+        sfen_buttons.pack(fill=tk.X)
+        ttk.Button(sfen_buttons, text=".sfenファイルを追加...",
+                   command=self._add_sfen_files).pack(side=tk.LEFT)
+        ttk.Button(sfen_buttons, text="追記を取り込み (全バッチ)",
+                   command=self._refresh_sfen_batches_ingest).pack(
+            side=tk.LEFT, padx=(6, 0))
+        ttk.Button(sfen_buttons, text="選択バッチを削除",
+                   command=self._delete_selected_batch).pack(
+            side=tk.LEFT, padx=(6, 0))
+        ttk.Label(sfen_frame, foreground="gray", wraplength=620,
+                  justify=tk.LEFT,
+                  text="1ファイル=1バッチ。課題局面までの共通手順は「(共通)」名の"
+                       "擬似対局として1回だけ登録される (終局理由列は「課題局面」)。"
+                       "追記は自動で追加分のみ、既読部分が書き換わったファイルは "
+                       "conflict になる (削除→追加で編集を反映)。").pack(
+            anchor=tk.W, pady=(4, 0))
+        tree_holder = ttk.Frame(sfen_frame)
+        tree_holder.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        cols = ("batch", "label", "date", "games", "prefix", "status")
+        tree = ttk.Treeview(tree_holder, columns=cols, show="headings",
+                            height=5)
+        for col, text_, width, anchor in (
+                ("batch", "バッチ", 190, tk.W), ("label", "ラベル", 160, tk.W),
+                ("date", "日付", 90, tk.W), ("games", "局数", 60, tk.E),
+                ("prefix", "課題手数", 70, tk.E),
+                ("status", "状態", 70, tk.CENTER)):
+            tree.heading(col, text=text_)
+            tree.column(col, width=width, anchor=anchor,
+                        stretch=col in ("batch", "label"))
+        sfen_scroll = ttk.Scrollbar(tree_holder, orient=tk.VERTICAL,
+                                    command=tree.yview)
+        tree.configure(yscrollcommand=sfen_scroll.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sfen_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._sfen_tree = tree
+        self._refresh_sfen_list()
+
         log_frame = ttk.LabelFrame(win, text="ログ", padding=4)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
         text = tk.Text(log_frame, wrap=tk.NONE, state=tk.DISABLED,
-                       font=self.mono_font, height=10)
+                       font=self.mono_font, height=8)
         log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL,
                                    command=text.yview)
         text.configure(yscrollcommand=log_scroll.set)
@@ -838,69 +906,10 @@ class PrecedentViewer:
             text.see(tk.END)
             text.config(state=tk.DISABLED)
 
-    # -- 掘り棋譜 (.sfen) 管理ウィンドウ -------------------------------------
-
-    def _open_sfen_window(self) -> None:
-        if self._sfen_win is not None and self._sfen_win.winfo_exists():
-            self._sfen_win.lift()
-            return
-        win = tk.Toplevel(self.root)
-        win.title("掘り棋譜 (.sfen) の管理")
-        win.geometry("760x480")
-        self._sfen_win = win
-
-        top = ttk.Frame(win, padding=8)
-        top.pack(fill=tk.X)
-        ttk.Label(top, text="専用DB:").pack(side=tk.LEFT)
-        ttk.Entry(top, textvariable=self.sfen_db_var).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        ttk.Button(top, text="ビューアで開く",
-                   command=self._open_sfen_db_in_viewer).pack(side=tk.RIGHT)
-
-        buttons = ttk.Frame(win, padding=(8, 0))
-        buttons.pack(fill=tk.X)
-        ttk.Button(buttons, text=".sfenファイルを追加...",
-                   command=self._add_sfen_files).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="追記を取り込み (全バッチ)",
-                   command=self._refresh_sfen_batches_ingest).pack(
-            side=tk.LEFT, padx=(6, 0))
-        ttk.Button(buttons, text="選択バッチを削除",
-                   command=self._delete_selected_batch).pack(
-            side=tk.LEFT, padx=(6, 0))
-        ttk.Label(win, foreground="gray", padding=(8, 2), wraplength=730,
-                  justify=tk.LEFT,
-                  text="1ファイル=1バッチ。課題局面までの共通手順は擬似対局として"
-                       "1回だけ登録される (終局理由列に「課題局面」)。追記は自動で"
-                       "追加分のみ取り込み、既読部分が書き換わったファイルは "
-                       "conflict になる (削除→追加で編集を反映)。").pack(anchor=tk.W)
-
-        tree_holder = ttk.Frame(win, padding=8)
-        tree_holder.pack(fill=tk.BOTH, expand=True)
-        cols = ("batch", "label", "date", "games", "prefix", "status")
-        tree = ttk.Treeview(tree_holder, columns=cols, show="headings")
-        for col, text_, width, anchor in (
-                ("batch", "バッチ", 190, tk.W), ("label", "ラベル", 180, tk.W),
-                ("date", "日付", 90, tk.W), ("games", "局数", 70, tk.E),
-                ("prefix", "課題手数", 70, tk.E),
-                ("status", "状態", 80, tk.CENTER)):
-            tree.heading(col, text=text_)
-            tree.column(col, width=width, anchor=anchor,
-                        stretch=col in ("batch", "label"))
-        scroll = ttk.Scrollbar(tree_holder, orient=tk.VERTICAL,
-                               command=tree.yview)
-        tree.configure(yscrollcommand=scroll.set)
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self._sfen_tree = tree
-        self._refresh_sfen_list()
+    # -- .sfen 連続対局の取り込み・バッチ管理 --------------------------------
 
     def _sfen_db(self) -> str:
         return self.sfen_db_var.get().strip() or str(DEFAULT_SFEN_DB)
-
-    def _open_sfen_db_in_viewer(self) -> None:
-        self.db_var.set(self._sfen_db())
-        if self.sfen_var.get().strip():
-            self.search()
 
     def _refresh_sfen_list(self) -> None:
         tree = getattr(self, "_sfen_tree", None)
@@ -935,9 +944,9 @@ class PrecedentViewer:
                 mixed = None
             if mixed and not messagebox.askyesno(
                     "確認",
-                    "このDBには実対局の前例が入っています。掘り棋譜は専用DBに"
+                    "このDBには実対局の前例が入っています。.sfen連続対局は専用DBに"
                     "分けることを推奨します。\nそれでも取り込みますか？",
-                    parent=self._sfen_win):
+                    parent=self._dialog_parent()):
                 return None
         return db
 
@@ -946,7 +955,7 @@ class PrecedentViewer:
         if db is None:
             return
         paths = filedialog.askopenfilenames(
-            title="掘り棋譜 (.sfen) を選択", parent=self._sfen_win,
+            title=".sfen 連続対局ファイルを選択", parent=self._dialog_parent(),
             filetypes=[("sfen棋譜", "*.sfen"), ("All", "*")])
         batches = list_batches(db) if Path(db).is_file() else []
         for p in paths:
@@ -967,11 +976,11 @@ class PrecedentViewer:
             scan = scan_file(path)
         except OSError as exc:
             messagebox.showerror("エラー", f"{path}: {exc}",
-                                 parent=self._sfen_win)
+                                 parent=self._dialog_parent())
             return None
-        dialog = tk.Toplevel(self._sfen_win or self.root)
+        dialog = tk.Toplevel(self._dialog_parent())
         dialog.title("バッチの取り込み")
-        dialog.transient(self._sfen_win or self.root)
+        dialog.transient(self._dialog_parent())
         dialog.grab_set()
         frame = ttk.Frame(dialog, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
@@ -1018,20 +1027,20 @@ class PrecedentViewer:
         def job():
             ingest_file(db, path, label=label or "",
                         date_str=date_str if date_str else None,
-                        log_line=lambda m: self._ulog(f"[掘り] {m}"))
+                        log_line=lambda m: self._ulog(f"[.sfen] {m}"))
             self.root.after(0, self._refresh_sfen_list)
 
-        self._db_jobs.put(("掘り棋譜取り込み", job))
+        self._db_jobs.put((".sfen取り込み", job))
 
     def _refresh_sfen_batches_ingest(self) -> None:
         """登録済みバッチを再走査し、追記分を取り込む (1ジョブに集約)。
 
-        1ヶ月以上前の日付のバッチは対象外 (掘りが今も伸びていることはまず
+        1ヶ月以上前の日付のバッチは対象外 (連続対局が今も伸びていることはまず
         無く、大量のファイル読みを避ける)。古いバッチを更新したいときは
         「.sfenファイルを追加...」で同じファイルを選べば日付に関係なく処理
         される。変更なしは無言、特記事項と最後の要約だけログに出す。"""
         if getattr(self, "_sfen_refresh_queued", False):
-            self._ulog("[掘り] 更新チェックは既に実行待ちです")
+            self._ulog("[.sfen] 更新チェックは既に実行待ちです")
             return
         db = self._sfen_db()
         if not Path(db).is_file():
@@ -1046,7 +1055,7 @@ class PrecedentViewer:
             else:
                 targets.append(b["path"])
         if not targets:
-            self._ulog(f"[掘り] 更新チェック対象なし"
+            self._ulog(f"[.sfen] 更新チェック対象なし"
                        f" (1ヶ月超 {old}件 / ファイル欠落 {missing}件)")
             return
         self._sfen_refresh_queued = True
@@ -1057,7 +1066,7 @@ class PrecedentViewer:
                 for p in targets:
                     r = ingest_file(db, p)
                     if r.conflict or r.rebuilt or r.added:
-                        self._ulog(f"[掘り] {Path(p).stem}: {r.summary()}")
+                        self._ulog(f"[.sfen] {Path(p).stem}: {r.summary()}")
                     if r.conflict:
                         conflicts += 1
                     elif r.unchanged:
@@ -1066,14 +1075,14 @@ class PrecedentViewer:
                         added += r.added
                 extra = (f" / 1ヶ月超スキップ {old}件" if old else "") + \
                         (f" / ファイル欠落 {missing}件" if missing else "")
-                self._ulog(f"[掘り] 更新チェック完了: 確認 {len(targets)}件 / "
+                self._ulog(f"[.sfen] 更新チェック完了: 確認 {len(targets)}件 / "
                            f"追加 {added}局 / conflict {conflicts}件 / "
                            f"変更なし {unchanged}件{extra}")
             finally:
                 self._sfen_refresh_queued = False
                 self.root.after(0, self._refresh_sfen_list)
 
-        self._db_jobs.put(("掘り更新チェック", job))
+        self._db_jobs.put((".sfen更新チェック", job))
 
     def _delete_selected_batch(self) -> None:
         tree = getattr(self, "_sfen_tree", None)
@@ -1088,16 +1097,16 @@ class PrecedentViewer:
         if not messagebox.askyesno(
                 "確認", f"バッチ「{stem}」を専用DBから完全に削除します。\n"
                         "よろしいですか？ (.sfenファイル自体は消えません)",
-                parent=self._sfen_win):
+                parent=self._dialog_parent()):
             return
 
         def job():
             deleted = delete_batch(db, path,
-                                   log_line=lambda m: self._ulog(f"[掘り] {m}"))
+                                   log_line=lambda m: self._ulog(f"[.sfen] {m}"))
             self.root.after(0, self._refresh_sfen_list)
-            self._ulog(f"[掘り] {stem}: {deleted}件削除")
+            self._ulog(f"[.sfen] {stem}: {deleted}件削除")
 
-        self._db_jobs.put(("掘りバッチ削除", job))
+        self._db_jobs.put((".sfenバッチ削除", job))
 
     def _enabled_sources(self):
         """有効な出典キーの集合。全てONなら None (絞り込み無しの高速経路)。"""

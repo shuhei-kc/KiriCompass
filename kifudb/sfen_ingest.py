@@ -1,4 +1,4 @@
-"""たややん掘り (連続自己対局 .sfen) の取り込みとバッチ管理。
+""".sfen 連続対局 (水匠定跡生成の出力) の取り込みとバッチ管理。
 
 1ファイル = 1バッチ (連続対局のひとまとまり)。各行が1局で、
 「(startpos | sfen <sfen>) moves <usi...> <resign|rep_draw>」の形式。
@@ -296,7 +296,7 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
                     result.conflict = True
                     result.error = (
                         f"同名バッチ ({path.stem}) が別の内容で登録済みです"
-                        f" ({old_path})。別の掘りなら .sfen をリネームするか、"
+                        f" ({old_path})。別の連続対局なら .sfen をリネームするか、"
                         "旧バッチを削除してから取り込んでください")
                     say(f"[{path.stem}] {result.error}")
                     return result
@@ -340,14 +340,16 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
             prefix_len = _common_prefix_len(new_games)
 
         if fresh and prefix_len and new_games:
-            # 課題局面までの共通手順を擬似対局として1回だけ索引する
+            # 課題局面までの共通手順を擬似対局として1回だけ索引する。
+            # 対局者名は「<ラベル> (共通)」— 課題局面で終局する棋譜だと
+            # 一覧で分かるようにする。
             rep = new_games[0]
             moves16, keys16 = _replay(rep.initial_sfen,
                                       rep.usi_moves[:prefix_len])
             task_touched: set[int] = set()
             _insert_game(conn, f"{path.stem}{TASK_SUFFIX}", date_str,
-                         label, rep.initial_sfen, moves16, keys16, 0,
-                         None, "task", task_touched)
+                         f"{label} (共通)", rep.initial_sfen, moves16, keys16,
+                         0, None, "task", task_touched)
             _refresh_stats(conn, task_touched)
 
         touched = set()
@@ -357,9 +359,11 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
             except (ValueError, KeyError, TypeError) as exc:
                 result.skipped.append(f"{game.lineno}行目: 再生失敗 ({exc})")
                 continue
+            # 対局者名は「<ラベル>_<行番号>」— .sfen の何局目かが一覧で分かる
             if _insert_game(conn, f"{path.stem}#L{game.lineno:05d}", date_str,
-                            label, game.initial_sfen, moves16, keys16,
-                            prefix_len, game.result, game.reason, touched):
+                            f"{label}_{game.lineno}", game.initial_sfen,
+                            moves16, keys16, prefix_len,
+                            game.result, game.reason, touched):
                 result.added += 1
         _refresh_stats(conn, touched)
 
