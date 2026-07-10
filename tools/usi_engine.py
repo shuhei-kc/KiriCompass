@@ -5,7 +5,7 @@
     python3 tools/usi_engine.py --db /path/to/csa.db
 
 将棋盤GUIへの登録用ラッパースクリプト生成 (これを登録する。
-省略時は KC2/runtime/kifudb_engine.command に作られる):
+省略時は KC2/runtime/kiricompass_engine.command に作られる):
     python3 tools/usi_engine.py --db /path/to/csa.db --make-launcher
 
 検討モードで使うと、局面ごとに前例の候補手がmultipvで表示され
@@ -24,7 +24,7 @@ from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR, PrecedentUsiEngine  # noq
 
 IS_WINDOWS = sys.platform == "win32"
 DEFAULT_LAUNCHER = RUNTIME_DIR / (
-    "kifudb_engine.bat" if IS_WINDOWS else "kifudb_engine.command")
+    "kiricompass_engine.bat" if IS_WINDOWS else "kiricompass_engine.command")
 
 
 def make_launcher(target: Path, args: argparse.Namespace) -> None:
