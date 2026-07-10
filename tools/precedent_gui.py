@@ -283,21 +283,28 @@ class PrecedentViewer:
                                     command=self.cand_tv.yview)
         self.cand_tv.configure(yscrollcommand=cand_scroll.set)
         cand_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        # 候補手の右: 上段に DB行/SFEN行 の収納トグル、少し空けて 3系統DB切替
+        # 候補手の右: 3系統DB切替。DB行/SFEN行の収納トグルはウィンドウ右端。
         switch = ttk.Frame(cand_holder)
         switch.pack(side=tk.LEFT, anchor=tk.N, padx=(10, 0), pady=4)
-        self._collapse_btn = ttk.Button(switch, text="▲", width=7,
-                                        command=self._toggle_top_rows)
-        self._collapse_btn.pack(fill=tk.X)
-        for i, (text_, kind) in enumerate((("csa", "public"),
-                                           ("private", "private"),
-                                           (".sfen", "sfen"))):
+        for text_, kind in (("csa", "public"), ("private", "private"),
+                            (".sfen", "sfen")):
             ttk.Button(switch, text=text_, width=7,
                        command=lambda k=kind: self._switch_db(k)).pack(
-                fill=tk.X, pady=(12, 1) if i == 0 else 1)
+                fill=tk.X, pady=1)
+        self._collapse_btn = ttk.Button(cand_holder, text="▲", width=2,
+                                        command=self._toggle_top_rows)
+        self._collapse_btn.pack(side=tk.RIGHT, anchor=tk.N, pady=4)
         panes.add(cand_holder, weight=1)
 
-        prec_frame = ttk.LabelFrame(panes, text="前例")
+        # 枠見出しを「前例 [名前フィルタ]」にする (labelwidgetで枠題に埋め込む)
+        prec_header = ttk.Frame(panes)
+        ttk.Label(prec_header, text="前例").pack(side=tk.LEFT)
+        self.name_filter_var = tk.StringVar()
+        self.name_filter_var.trace_add(
+            "write", lambda *_args: self._apply_name_filter())
+        ttk.Entry(prec_header, textvariable=self.name_filter_var,
+                  width=16).pack(side=tk.LEFT, padx=(6, 0))
+        prec_frame = ttk.LabelFrame(panes, labelwidget=prec_header)
 
         # 出典フィルタ。切り替えるとDBから絞り込み条件付きで1ページ取り直す
         # (ロード済み分の表示切替ではない)。No. は現在の条件での新しい順の順位。
@@ -1200,11 +1207,37 @@ class PrecedentViewer:
             REASON_JA.get(p.end_reason, p.end_reason),
             p.ply_count, p.source))
 
+    def _name_matches(self, p) -> bool:
+        """名前フィルタ (大文字小文字を無視した部分一致) に合致するか。"""
+        query = self.name_filter_var.get().strip().lower()
+        return (not query or query in p.black_name.lower()
+                or query in p.white_name.lower())
+
+    def _apply_name_filter(self) -> None:
+        """名前フィルタの変更のたびに、ロード済みの前例一覧を書き換える。
+
+        DBへは再問い合わせしない (取得済み1000件単位の中を絞り込む)。
+        No. は取得時の順位のまま表示する。"""
+        self.prec_tv.delete(*self.prec_tv.get_children())
+        shown = 0
+        for index, p in enumerate(self.precedents):
+            if self._name_matches(p):
+                self._insert_prec_row(index, p)
+                shown += 1
+        if self.name_filter_var.get().strip():
+            self.status_var.set(
+                f"前例 {self._total_games}局 / 名前フィルタ一致 {shown}件 "
+                f"(取得済み {len(self.precedents)}件中)")
+        else:
+            self.status_var.set(
+                f"前例 {self._total_games}局 / 表示 {shown}件")
+
     def _append_precedents(self, page) -> None:
         """Append one page of precedents to the table (used by search & 続き)."""
         start = len(self.precedents)
         for offset, p in enumerate(page):
-            self._insert_prec_row(start + offset, p)
+            if self._name_matches(p):
+                self._insert_prec_row(start + offset, p)
         self.precedents.extend(page)
         # ページが満杯 = まだ続きがある可能性が高い
         self.more_button.config(
