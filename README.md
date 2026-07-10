@@ -19,7 +19,8 @@ python3 tools/build_db.py csa.db /path/to/kifu_folder --log build.log
 DBを使う場合は絶対パスか、`./csa.db`・`path/to/csa.db` のように
 ディレクトリ付きで指定する。
 
-KiriCompassビューア (sfenを貼り付けて検索するGUI):
+KiriCompassビューア (sfenを貼り付けて検索するGUI) — **KiriCompass.command**
+(macOS) / **KiriCompass.bat** (Windows) のダブルクリック、またはCLIから:
 
 ```bash
 python3 tools/precedent_gui.py csa.db
