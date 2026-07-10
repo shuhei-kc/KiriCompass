@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .analysis import decode_evals, decode_pvs
 from .board import move16_to_usi, normalize_sfen_main, position_key_from_sfen
-from .db import open_read_only
+from .db import open_read_only, resolve_db_path
 
 # 前例一覧の1ページあたりの件数 (GUI・CLI・APIのデフォルトを一元管理)
 DEFAULT_PAGE_SIZE = 1000
@@ -223,7 +223,10 @@ class PrecedentReader:
     """
 
     def __init__(self, db_path: str | Path) -> None:
-        self.db_path = str(db_path)
+        # 素の名前は data/ に解決してから保持する (db.resolve_db_path)。
+        # 呼び出し側は db_path 属性で「同じDBか」を判定するため、表記揺れ
+        # ('csa.db' と絶対パス) が別DB扱いにならないようここで正規化する。
+        self.db_path = str(resolve_db_path(db_path))
         self.conn = open_read_only(db_path)
         self._lock = threading.RLock()
         self._intervals: "list[tuple[str, int, int]] | None" = None

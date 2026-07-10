@@ -16,6 +16,8 @@
   書き出すsyncファイルを追従して自動検索する。単体利用時はOFFにしてよい。
 """
 
+from __future__ import annotations
+
 import json
 import queue
 import random
@@ -36,7 +38,7 @@ from kifudb.ki2 import format_pv_ki2, move16_to_ki2  # noqa: E402
 from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
                           PrecedentReader, REASON_JA,
                           compute_source_intervals, tournament_label)
-from kifudb.db import open_for_write, open_read_only  # noqa: E402
+from kifudb.db import open_for_write, open_read_only, resolve_db_path  # noqa: E402
 from kifudb.floodgate import update_once  # noqa: E402
 from kifudb.ingest import (KIFU_SUFFIXES, detect_source,  # noqa: E402
                            ingest_folder)
@@ -103,6 +105,16 @@ AUTO_UPDATE_JITTER = 300
 INTERVALS_CACHE_PATH = RUNTIME_DIR / "source_intervals.json"
 
 
+def norm_db_path(raw: str) -> str:
+    """入力欄・設定・引数のDBパスを正規化した文字列にする (空は空のまま)。
+
+    素の名前 ('csa.db') は data/ に解決する (kifudb.db.resolve_db_path)。
+    GUI内の全読み取り箇所がこれを通ることで、キャッシュのキー・Readerの
+    同一性判定・存在チェックがCLI/エンジンと同じDBを指すことを保証する。"""
+    raw = raw.strip()
+    return str(resolve_db_path(raw)) if raw else ""
+
+
 def load_interval_sidecar(db_path: str):
     """前回起動時に計算した島表を、検証付きで読み込む。
 
@@ -111,7 +123,7 @@ def load_interval_sidecar(db_path: str):
     戻り値: (intervals, max_gid, count) または None。"""
     try:
         data = json.loads(INTERVALS_CACHE_PATH.read_text(encoding="utf-8"))
-        entry = data[str(Path(db_path).resolve())]
+        entry = data[str(resolve_db_path(db_path).resolve())]
         conn = open_read_only(db_path)
         try:
             max_gid, count = conn.execute(
@@ -132,7 +144,7 @@ def save_interval_sidecar(db_path: str, intervals, max_gid: int,
             data = json.loads(INTERVALS_CACHE_PATH.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             data = {}
-        data[str(Path(db_path).resolve())] = {
+        data[str(resolve_db_path(db_path).resolve())] = {
             "max_gid": max_gid, "count": count,
             "intervals": [list(iv) for iv in intervals]}
         INTERVALS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -200,7 +212,7 @@ class PrecedentViewer:
         self._build_widgets()
         self._load_config()
         if len(sys.argv) > 1:
-            self.db_var.set(sys.argv[1])
+            self.db_var.set(norm_db_path(sys.argv[1]))
         self._prime_source_intervals()  # 起動直後から先読みを始める
         threading.Thread(target=self._db_worker, daemon=True).start()
         self._schedule_auto_update()
@@ -437,7 +449,7 @@ class PrecedentViewer:
         たびにモーダルが出るのを防ぐ)。"""
         if self._search_running:
             return
-        db_path = self.db_var.get().strip()
+        db_path = norm_db_path(self.db_var.get())
         sfen = self.sfen_var.get().strip()
         if not db_path or not Path(db_path).is_file():
             message = "有効なDBファイルを指定してください。"
@@ -542,7 +554,7 @@ class PrecedentViewer:
         起動直後と検索開始時に呼ばれる。専用の読み取り接続で走るため、検索
         など他の処理をブロックしない。失敗した場合は記録を消し、次の機会に
         再試行する (絞り込み自体は検索スレッドの同期計算でも正しく動く)。"""
-        db_path = self.db_var.get().strip()
+        db_path = norm_db_path(self.db_var.get())
         if (not db_path or db_path in self._interval_cache
                 or db_path in self._interval_jobs
                 or not Path(db_path).is_file()):
@@ -625,7 +637,7 @@ class PrecedentViewer:
         def norm(path: str) -> str:
             path = path.strip()
             try:
-                return str(Path(path).resolve()) if path else ""
+                return str(resolve_db_path(path).resolve()) if path else ""
             except OSError:
                 return path
         current = norm(self.db_var.get())
@@ -674,7 +686,7 @@ class PrecedentViewer:
         var, role = {"public": (self.fg_db_var, "公開前例DB"),
                      "private": (self.private_db_var, "プライベートDB"),
                      "sfen": (self.sfen_db_var, ".sfen DB")}[kind]
-        db_path = var.get().strip()
+        db_path = norm_db_path(var.get())
         if not db_path:
             messagebox.showerror(
                 "エラー", "切り替え先のDBが未設定です。"
@@ -735,7 +747,7 @@ class PrecedentViewer:
 
         手動操作 (quiet=False) でDBファイルが無ければ新規作成を提案する。
         自動更新 (quiet=True) はダイアログを出せないためログに残してスキップ。"""
-        db_path = self.fg_db_var.get().strip()
+        db_path = norm_db_path(self.fg_db_var.get())
         if not db_path:
             message = "公開前例DBが未指定です"
             if quiet:
@@ -790,7 +802,7 @@ class PrecedentViewer:
         public_db = self._floodgate_target_db()  # 検証込み (sfen混入も拒否)
         if public_db is None:
             return
-        private_db = self.private_db_var.get().strip() or str(DEFAULT_PRIVATE_DB)
+        private_db = norm_db_path(self.private_db_var.get()) or str(DEFAULT_PRIVATE_DB)
         if self._db_has_sfen_games(private_db):
             messagebox.showerror(
                 "エラー", "プライベートDBに.sfen連続対局が入っています。"
@@ -1050,7 +1062,7 @@ class PrecedentViewer:
     # -- .sfen 連続対局の取り込み・バッチ管理 --------------------------------
 
     def _sfen_db(self) -> str:
-        return self.sfen_db_var.get().strip() or str(DEFAULT_SFEN_DB)
+        return norm_db_path(self.sfen_db_var.get()) or str(DEFAULT_SFEN_DB)
 
     def _refresh_sfen_list(self) -> None:
         tree = getattr(self, "_sfen_tree", None)
@@ -1270,7 +1282,7 @@ class PrecedentViewer:
             self._refetch_precedents()
 
     def _refetch_precedents(self) -> None:
-        db_path = self.db_var.get().strip()
+        db_path = norm_db_path(self.db_var.get())
         sfen = self.sfen_var.get().strip()
         if not db_path or not sfen:
             return
@@ -1353,7 +1365,7 @@ class PrecedentViewer:
         last = self.precedents[-1]
         before = (last.sort_key, last.game_id)
         start_rank = last.rank
-        db_path = self.db_var.get().strip()
+        db_path = norm_db_path(self.db_var.get())
         sfen = self.sfen_var.get().strip()
         sources = self._enabled_sources()
         self._search_running = True
@@ -1394,7 +1406,7 @@ class PrecedentViewer:
                  f"{p.started_at[:10].replace('-', '/')}  "
                  f"{RESULT_JA.get(p.result, '?')} ({REASON_JA.get(p.end_reason, p.end_reason)}) "
                  f"{p.ply_count}手"]
-        detail = self._get_reader(self.db_var.get().strip()).get_game(p.game_id)
+        detail = self._get_reader(norm_db_path(self.db_var.get())).get_game(p.game_id)
         if detail and detail.evals:
             ply = p.ply
             eval_here = detail.evals[ply] if ply < len(detail.evals) else None
@@ -1416,7 +1428,7 @@ class PrecedentViewer:
         """棋譜テキストを取得。元ファイルが残っていればそれを優先する
         (消費時間やコメントなど情報が多いため)。なければDBから復元する。
         戻り値: (テキスト, 出所の説明)"""
-        reader = self._get_reader(self.db_var.get().strip())
+        reader = self._get_reader(norm_db_path(self.db_var.get()))
         source = reader.get_source_path(game_id)
         if source and Path(source).is_file():
             raw = Path(source).read_bytes()
@@ -1466,7 +1478,7 @@ class PrecedentViewer:
         if p is None:
             return
         try:
-            reader = self._get_reader(self.db_var.get().strip())
+            reader = self._get_reader(norm_db_path(self.db_var.get()))
             source = reader.get_source_path(p.game_id)
             if source and Path(source).is_file():
                 self._open_local_file(Path(source))
@@ -1616,13 +1628,13 @@ class PrecedentViewer:
         try:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_PATH.write_text(json.dumps({
-                "db_path": self.db_var.get().strip(),
+                "db_path": norm_db_path(self.db_var.get()),
                 "last_sfen": self.sfen_var.get().strip(),
                 "floodgate_auto_update": self.auto_update_var.get(),
                 "sync_follow": self.sync_var.get(),
-                "floodgate_db_path": self.fg_db_var.get().strip(),
-                "private_db_path": self.private_db_var.get().strip(),
-                "sfen_db_path": self.sfen_db_var.get().strip()},
+                "floodgate_db_path": norm_db_path(self.fg_db_var.get()),
+                "private_db_path": norm_db_path(self.private_db_var.get()),
+                "sfen_db_path": norm_db_path(self.sfen_db_var.get())},
                 ensure_ascii=False))
         except OSError:
             pass

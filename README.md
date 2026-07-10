@@ -14,6 +14,11 @@ DBの作成・更新 (増分。同じフォルダに再実行しても安全):
 python3 tools/build_db.py csa.db /path/to/kifu_folder --log build.log
 ```
 
+**DB名の解決規則 (全ツール共通):** `csa.db` のようにディレクトリなしで
+指定したDB名は、どこから実行しても常に `KC2/data/` 内を指す。別の場所の
+DBを使う場合は絶対パスか、`./csa.db`・`path/to/csa.db` のように
+ディレクトリ付きで指定する。
+
 KiriCompassビューア (sfenを貼り付けて検索するGUI):
 
 ```bash

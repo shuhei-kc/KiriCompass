@@ -16,6 +16,25 @@ from pathlib import Path
 
 SCHEMA_VERSION = 3
 
+# DBの標準置き場。素の名前で指定されたDBはここに解決される。
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+def resolve_db_path(db_path: str | Path) -> Path:
+    """DBパスの解決規則 (全ツール共通の一元定義)。
+
+    ディレクトリ成分のない素の名前 ('csa.db') は KC2/data/ 内を指す —
+    実行時のカレントディレクトリに意味を持たせず、CLI・GUI・USIエンジンの
+    どこから同じ名前を渡しても同じDBに解決されることを保証する (役割別DBの
+    分離は「全員が同じファイルを見ている」ことが前提のため)。
+    絶対パスと、'./csa.db' や 'data/csa.db' のようにディレクトリを含む
+    相対パスは、明示指定としてそのまま使う。"""
+    p = Path(db_path)
+    if (not p.is_absolute() and p.parent == Path(".")
+            and not str(db_path).startswith(("./", ".\\"))):
+        return DATA_DIR / p
+    return p
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -89,6 +108,8 @@ CREATE TABLE IF NOT EXISTS source_files (
 
 
 def open_for_write(db_path: str | Path) -> sqlite3.Connection:
+    db_path = resolve_db_path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)  # data/ は初回に無い
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -164,8 +185,8 @@ def open_read_only(db_path: str | Path) -> sqlite3.Connection:
     # check_same_thread=False: readers are used from GUI worker threads;
     # PrecedentReader serializes all access to a shared connection with an
     # RLock (query.py), so cross-thread use is safe.
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10.0,
-                           check_same_thread=False)
+    conn = sqlite3.connect(f"file:{resolve_db_path(db_path)}?mode=ro",
+                           uri=True, timeout=10.0, check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA cache_size=-65536")    # 64MB
     conn.execute("PRAGMA mmap_size=1073741824")  # mmap up to 1GB

@@ -13,6 +13,8 @@
 閲覧中の局面がsyncファイルに書き出されてKiriCompassビューアが追従できる。
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import stat
@@ -20,6 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from kifudb.db import resolve_db_path  # noqa: E402
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR, PrecedentUsiEngine  # noqa: E402
 
 IS_WINDOWS = sys.platform == "win32"
@@ -35,8 +38,10 @@ def make_launcher(target: Path, args: argparse.Namespace) -> None:
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     script_path = Path(__file__).resolve()
+    # 素のDB名 ('csa.db') は data/ に解決してから埋め込む。生成時のカレント
+    # ディレクトリでランチャーの中身が変わってはいけない (resolve_db_path)。
     common_args = (
-        f' --db "{Path(args.db).resolve()}"'
+        f' --db "{resolve_db_path(args.db)}"'
         f' --sync-file "{Path(args.sync_file).resolve()}"'
         f" --multipv {args.multipv} --pv-depth {args.pv_depth}"
         f" --encoding {args.encoding}"

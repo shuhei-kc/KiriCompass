@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from . import analysis, csa, kif
-from .db import open_for_write
+from .db import open_for_write, resolve_db_path
 
 log = logging.getLogger("kifudb.ingest")
 
@@ -194,6 +194,8 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
     (公開/プライベートの振り分け取り込みに使う)。
     """
     folder = Path(folder)
+    # 取り込み先を必ずログに残す (素の名前は data/ に解決される)
+    log.info("database: %s", resolve_db_path(db_path))
     conn = open_for_write(db_path)
     stats = IngestStats()
 

@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 
 from .board import Position, apply_move16, normalize_sfen_main, usi_to_move16
+from .db import resolve_db_path
 from .query import PrecedentReader
 
 # Runtime files (sync file, launcher, GUI config) live inside the package
@@ -58,11 +59,13 @@ class PrecedentUsiEngine:
 
     def _get_reader(self) -> PrecedentReader | None:
         """Persistent DB handle (kept open so lookups stay warm)."""
-        if self._reader is not None and self._reader.db_path != self.db_path:
+        resolved = resolve_db_path(self.db_path) if self.db_path else None
+        if (self._reader is not None
+                and self._reader.db_path != str(resolved)):
             self._reader.close()
             self._reader = None
-        if self._reader is None and self.db_path and Path(self.db_path).is_file():
-            self._reader = PrecedentReader(self.db_path)
+        if self._reader is None and resolved is not None and resolved.is_file():
+            self._reader = PrecedentReader(resolved)
         return self._reader
 
     # -- plumbing ----------------------------------------------------------
@@ -110,10 +113,12 @@ class PrecedentUsiEngine:
         elif command == "setoption":
             self._setoption(parts)
         elif command == "isready":
-            if self.db_path and Path(self.db_path).is_file():
+            if self.db_path and resolve_db_path(self.db_path).is_file():
                 self.send("readyok")
             else:
-                self.send(f"info string DB not found: {self.db_path!r} "
+                resolved = (str(resolve_db_path(self.db_path))
+                            if self.db_path else "<unset>")
+                self.send(f"info string DB not found: {resolved} "
                           "(set DbPath or pass --db)")
                 self.send("readyok")  # stay registered; lookups will report no data
         elif command == "usinewgame":
