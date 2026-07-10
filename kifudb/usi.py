@@ -2,10 +2,11 @@
 
 Register the launcher script in a USI shogi GUI and use it in
 research (検討) mode: every position you navigate to is looked up in the
-database and the top precedent moves are reported as multipv info lines
-(move counts appear in the "nodes" column, scores are win rates mapped to
-centipawns from the side to move's perspective). Each PV is a greedy walk
-along the most frequent precedent continuation.
+database and the top precedent moves are reported as multipv info lines.
+Move counts appear in the "nodes" column; scores are always 0 (win-rate
+conversions would look authoritative without meaning — the information
+lives in nodes and the PV). Each PV is a greedy walk along the most
+frequent precedent continuation.
 
 The engine also mirrors every `position` command into a small JSON sync
 file, which the precedent viewer GUI can follow (one-directional link,

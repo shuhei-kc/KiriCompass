@@ -4,8 +4,10 @@
 Usage:
     python3 tools/update_floodgate.py <db_path> [--mirror DIR] [--days N]
 
-毎時 :25/:55 に実行する想定 (対局は毎時 :00/:30 開始)。GUIの「DB更新」
-ウィンドウと同じ kifudb.floodgate.update_once を呼ぶだけの薄いラッパー。
+毎時 :20/:50 起点 + ランダムな待ち での実行を推奨 (対局は毎時 :00/:30 開始。
+利用者全員が同一秒に集中しないための分散。READMEの sleep 例を参照)。
+GUIの「DB更新」ウィンドウと同じ kifudb.floodgate.update_once を
+呼ぶだけの薄いラッパー。
 """
 
 import argparse

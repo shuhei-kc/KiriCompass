@@ -9,8 +9,8 @@
     python3 tools/usi_engine.py --db /path/to/csa.db --make-launcher
 
 検討モードで使うと、局面ごとに前例の候補手がmultipvで表示され
-(nodes列=出現局数、評価値=手番側の勝率換算)、閲覧中の局面が
-syncファイルに書き出されてKiriCompassビューアが追従できる。
+(nodes列=出現局数、読み筋=最頻前例の続き。評価値は意味を持たないので常に0)、
+閲覧中の局面がsyncファイルに書き出されてKiriCompassビューアが追従できる。
 """
 
 import argparse
