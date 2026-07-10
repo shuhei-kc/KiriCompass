@@ -39,6 +39,7 @@ def make_launcher(target: Path, args: argparse.Namespace) -> None:
         f' --db "{Path(args.db).resolve()}"'
         f' --sync-file "{Path(args.sync_file).resolve()}"'
         f" --multipv {args.multipv} --pv-depth {args.pv_depth}"
+        f" --encoding {args.encoding}"
         + (f' --log "{Path(args.log).resolve()}"' if args.log else ""))
     if IS_WINDOWS:
         content = (f'@echo off\r\n'
@@ -63,6 +64,10 @@ def main() -> None:
                         help="閲覧中局面の書き出し先 (前例ビューアが追従)")
     parser.add_argument("--multipv", type=int, default=8)
     parser.add_argument("--pv-depth", type=int, default=12)
+    parser.add_argument("--encoding", choices=("utf-8", "cp932"),
+                        default="utf-8",
+                        help="GUIへの出力エンコーディング "
+                             "(ShogiHome=utf-8 / ShogiGUI・将棋所=cp932)")
     parser.add_argument("--log", default=None, help="デバッグログの書き出し先")
     parser.add_argument("--make-launcher", nargs="?", const=str(DEFAULT_LAUNCHER),
                         default=None, metavar="PATH",
@@ -79,6 +84,9 @@ def main() -> None:
     engine = PrecedentUsiEngine(
         db_path=args.db, sync_file=args.sync_file,
         multipv=args.multipv, pv_depth=args.pv_depth, log_file=args.log)
+    # ShogiGUI・将棋所向け (cp932) は起動フラグで、あるいはGUIの
+    # setoption OutputEncoding からも実行中に切り替えられる。
+    engine.set_output_encoding(args.encoding)
     engine.run()
 
 
@@ -86,7 +94,8 @@ if __name__ == "__main__":
     # GUIから起動された際に確実に行バッファで動くようにする
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     # ShogiHome (Node readline) はUTF-8でエンジン出力を読むため、
-    # Windowsのcp932既定に引きずられないよう明示的にUTF-8へ固定する。
+    # Windowsのcp932既定に引きずられないよう既定はUTF-8に固定する
+    # (--encoding cp932 で上書き可能)。
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")

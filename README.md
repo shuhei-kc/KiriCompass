@@ -27,6 +27,10 @@ ShogiHome連動 (USIダミーエンジン):
 python3 tools/usi_engine.py --db precedents.db --make-launcher
 ```
 
+ShogiGUI・将棋所に登録する場合は出力をCP932にする (既定のUTF-8のままだと
+日本語のinfo表示が文字化けする)。ランチャー生成時に `--encoding cp932` を
+付けるか、GUIのエンジン設定で `OutputEncoding` を `cp932` にする。
+
 ShogiHomeの検討モードで使うと、局面ごとに前例の候補手がmultipvで表示される
 (nodes列=出現局数、読み筋=最頻前例の続き。評価値は意味を持たないので常に0)。
 同時に閲覧中の局面がsyncファイル (`runtime/sync_position.json`) に書き出され、

@@ -103,6 +103,8 @@ class PrecedentUsiEngine:
             self.send(f"option name SyncFile type string default {self.sync_file or ''}")
             self.send(f"option name MultiPV type spin default {self.multipv} min 1 max 50")
             self.send(f"option name PvDepth type spin default {self.pv_depth} min 1 max 100")
+            self.send(f"option name OutputEncoding type combo "
+                      f"default {self._output_encoding()} var utf-8 var cp932")
             self.send("usiok")
         elif command == "setoption":
             self._setoption(parts)
@@ -146,6 +148,25 @@ class PrecedentUsiEngine:
             self.multipv = max(1, int(value))
         elif key == "pvdepth":
             self.pv_depth = max(1, int(value))
+        elif key == "outputencoding":
+            self.set_output_encoding(value)
+
+    def _output_encoding(self) -> str:
+        current = (getattr(self.writer, "encoding", None) or "utf-8").lower()
+        return "cp932" if current in ("cp932", "shift_jis", "mbcs") else "utf-8"
+
+    def set_output_encoding(self, encoding: str) -> None:
+        """info文字列の出力エンコーディングを切り替える。
+
+        ShogiHome はエンジン出力をUTF-8で読むが、ShogiGUI・将棋所 (日本語
+        Windows) はCP932を期待するため、日本語のinfo文字列が化ける。GUIの
+        エンジン設定 (setoption OutputEncoding) か --encoding で合わせる。"""
+        if encoding not in ("utf-8", "cp932"):
+            return
+        try:
+            self.writer.reconfigure(encoding=encoding, errors="replace")
+        except (AttributeError, OSError, LookupError):
+            pass
 
     def _set_position(self, args: list[str]) -> None:
         moves: list[str] = []
