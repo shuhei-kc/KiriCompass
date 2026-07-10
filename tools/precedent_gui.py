@@ -251,12 +251,14 @@ class PrecedentViewer:
         sync_check.grid(row=1, column=3, sticky=tk.W, padx=(6, 0), pady=(6, 0))
         top.columnconfigure(1, weight=1)
 
-        # DB行・SFEN行の収納対象 (トグルボタンは候補手右の切替ボタン群の上)
-        self._top_collapsibles = list(top.grid_slaves())
+        # DB行・SFEN行の収納 (トグルボタンは候補手右の切替ボタン群の上)。
+        # フレームごと外すので、畳んだときは余白も含めて完全に詰まる。
+        self._top_frame = top
         self._top_collapsed = False
 
         panes = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._panes = panes  # 収納トグルが top フレームを戻す位置の基準
 
         # PanedWindowのペインは全幅に広がるため、コンテナを挟んで
         # 枠線(LabelFrame)ごと列幅に合わせて左詰めにする
@@ -575,13 +577,13 @@ class PrecedentViewer:
     def _toggle_top_rows(self) -> None:
         """DB行・SFEN行を収納/展開する (盤面GUI追従で使う際の省スペース化)。
 
-        grid_remove は配置設定を覚えたまま隠すので、再表示で元に戻る。"""
+        フレームごと pack から外すので、余白も含めて完全に詰まる。展開は
+        panes の前に戻すことで元の位置に復帰する。"""
         self._top_collapsed = not self._top_collapsed
-        for widget in self._top_collapsibles:
-            if self._top_collapsed:
-                widget.grid_remove()
-            else:
-                widget.grid()
+        if self._top_collapsed:
+            self._top_frame.pack_forget()
+        else:
+            self._top_frame.pack(fill=tk.X, before=self._panes)
         self._collapse_btn.config(text="▼" if self._top_collapsed else "▲")
 
     def _switch_db(self, kind: str) -> None:
