@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import array
 import calendar
+import hashlib
 import logging
 import re
 import sqlite3
@@ -17,15 +18,20 @@ log = logging.getLogger("kifudb.ingest")
 
 KIFU_SUFFIXES = {".csa", ".kif", ".kifu"}
 
-_SOURCE_PATTERNS = [
-    # wdoorサーバー上の対局はテスト対局室 (wdoor+test-... 等) も含めて
-    # すべて floodgate 扱いにする (アーカイブとURL規則が同一のため)。
-    (re.compile(r"^wdoor\+", re.I), "floodgate"),
-    # WCSC本戦(wcscNN)に加え、2020年オンライン開催のWCSO(=第30回)も
-    # WCSC系として扱う。
-    (re.compile(r"^wcs[co]", re.I), "wcsc"),
-    (re.compile(r"^dr\d", re.I), "denryusen"),
-]
+# 出典判定は「配布できる公開棋譜である」ことの証明として使う (公開/プライベート
+# の振り分け) ため、接頭辞だけでなくサーバー・大会の命名構造まで要求する —
+# 接頭辞一致だけでは私的なファイル名 (例 'dr2_研究メモ.kif') が偶然マッチして
+# 公開DBへ紛れ込む余地がある。全1,080,482件の実eventで一致を検証済み。
+# - floodgate:  wdoor+<棋戦>+<先手>+<後手>+<開始時刻14桁>。テスト対局室も
+#               含めてすべて floodgate 扱い (アーカイブとURL規則が同一のため)
+# - WCSC/WCSO:  wcscNN/wcsoNN + 区切り (+ か _)。WCSO は2020年オンライン開催
+#               (=第30回)。例外: WCSC28決勝の回次欠落形式 (WCSC_F1_...)
+# - 電竜戦:     <大会接頭辞>+...+<開始時刻14桁>。接頭辞は dr<数字> で始まる
+#               もの (将来の大会名への余裕) か、既知の変則接頭辞
+#               (獅子王戦・後援大会等 → query.py の解決表)
+_TS_TAIL_RE = re.compile(r"\+\d{14}$")
+_WCSC_EVENT_RE = re.compile(r"^wcs[co]\d+[+_]|^wcsc_f\d", re.I)
+_DR_PREFIX_RE = re.compile(r"^dr\d", re.I)
 
 
 def date_sort_key(started_at: str) -> int:
@@ -42,14 +48,20 @@ def date_sort_key(started_at: str) -> int:
 
 
 def detect_source(event_or_name: str) -> str:
-    for pattern, name in _SOURCE_PATTERNS:
-        if pattern.search(event_or_name):
-            return name
-    # 電竜戦には接頭辞が 'dr\d' でないもの (獅子王戦=shishio3、後援大会=donou3、
-    # 実験対局=drjikken 等) があるので、URL解決表で拾えれば denryusen とする。
-    from .query import _denryusen_tournament
-    if _denryusen_tournament(event_or_name):
-        return "denryusen"
+    event = event_or_name
+    if event.lower().startswith("wdoor+") and _TS_TAIL_RE.search(event):
+        return "floodgate"
+    if _WCSC_EVENT_RE.match(event):
+        return "wcsc"
+    if _TS_TAIL_RE.search(event):
+        prefix = event.split("+", 1)[0]
+        if _DR_PREFIX_RE.match(prefix):
+            return "denryusen"
+        # 接頭辞が 'dr\d' でない電竜戦 (獅子王戦=shishio3、後援大会=donou3、
+        # 実験対局=drjikken 等) は、URL解決表で拾えれば denryusen とする。
+        from .query import _denryusen_tournament
+        if _denryusen_tournament(event):
+            return "denryusen"
     return "other"
 
 
@@ -277,12 +289,24 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
         log.warning("%s: %s", path.name, warning)
 
     event = rec.event or path.stem
+    source = detect_source(event)
+    if source == "other":
+        # 私的棋譜の event はファイル名語幹で、公開棋譜と違い一意性の保証が
+        # ない (別フォルダの「対局1.kif」同士が別対局、はありがち)。指し手
+        # 内容のハッシュを重複排除キーに含め、同名別対局は両方登録し、
+        # 同一内容の複製だけを弾く。ハッシュは内容から決定的に決まるので、
+        # DBから復元した棋譜の再取り込みでも同じ event になり二重登録しない。
+        content = (array.array("H", rec.moves).tobytes()
+                   + (rec.initial_sfen or "").encode())
+        suffix = "#" + hashlib.blake2b(content, digest_size=4).hexdigest()
+        if not event.endswith(suffix):
+            event += suffix
     cursor = conn.execute(
         "INSERT OR IGNORE INTO games "
         "(event, source, started_at, black_name, white_name, result, "
         " end_reason, ply_count, initial_sfen, moves) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (event, detect_source(event), rec.start_time, rec.black_name,
+        (event, source, rec.start_time, rec.black_name,
          rec.white_name, rec.result, rec.end_reason, len(rec.moves),
          rec.initial_sfen, array.array("H", rec.moves).tobytes()))
     if cursor.rowcount == 0:
