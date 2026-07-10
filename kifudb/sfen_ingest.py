@@ -69,6 +69,7 @@ class SfenIngestResult:
     skipped: list[str] = field(default_factory=list)
     conflict: bool = False
     unchanged: bool = False
+    rebuilt: bool = False          # 追記で課題局面が動き、バッチを再構築した
     prefix_len: int = 0
 
     def summary(self) -> str:
@@ -76,7 +77,10 @@ class SfenIngestResult:
             return "conflict: 既読部分が変更されています (削除→再取り込みで反映)"
         if self.unchanged:
             return "変更なし"
-        parts = [f"追加 {self.added}局"]
+        parts = []
+        if self.rebuilt:
+            parts.append("課題局面の位置が変わったため再構築")
+        parts.append(f"追加 {self.added}局")
         if self.prefix_len:
             parts.append(f"課題局面 {self.prefix_len}手目")
         if self.skipped:
@@ -251,6 +255,7 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
     conn = open_for_write(db_path)
     try:
         status, detail = _detail_row(conn, path)
+        fresh = True   # 新規/再構築 = 擬似対局から入れ直す
         if detail is not None:
             # --- 既知バッチ: 追記チェック (既読部分のハッシュを常に検証) ---
             known = detail["lines"]
@@ -266,29 +271,39 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
             if len(lines) == known:
                 result.unchanged = True
                 return result
-            new_games, skipped = _parse_lines(lines[known:], known + 1)
-            result.skipped = skipped
             label = detail.get("label") or path.stem
             date_str = detail.get("date", "")
-            prefix_len = detail.get("prefix", 0)
+            old_games, _ = _parse_lines(lines[:known])  # 警告は初回に報告済み
+            new_games, result.skipped = _parse_lines(lines[known:], known + 1)
+            prefix_len = _common_prefix_len(old_games + new_games)
+            if prefix_len != detail.get("prefix", 0):
+                # 追記で課題局面の位置が変わった: より手前の分岐が判明したか、
+                # 初回が1局のみで接頭辞を検出できていなかったケース。既読部分
+                # はハッシュ検証済みなので、ファイルを正としてバッチ全体を
+                # 同一トランザクション内で作り直す (中断はロールバック)。
+                _delete_batch_rows(conn, path.stem)
+                result.rebuilt = True
+                new_games = old_games + new_games
+            else:
+                fresh = False
         else:
             # --- 新規バッチ ---
-            new_games, skipped = _parse_lines(lines)
-            result.skipped = skipped
+            new_games, result.skipped = _parse_lines(lines)
             label = label or path.stem
             if date_str is None:
                 date_str = date_from_name(path)
             prefix_len = _common_prefix_len(new_games)
-            if prefix_len and new_games:
-                # 課題局面までの共通手順を擬似対局として1回だけ索引する
-                rep = new_games[0]
-                moves16, keys16 = _replay(rep.initial_sfen,
-                                          rep.usi_moves[:prefix_len])
-                task_touched: set[int] = set()
-                _insert_game(conn, f"{path.stem}{TASK_SUFFIX}", date_str,
-                             label, rep.initial_sfen, moves16, keys16, 0,
-                             None, "task", task_touched)
-                _refresh_stats(conn, task_touched)
+
+        if fresh and prefix_len and new_games:
+            # 課題局面までの共通手順を擬似対局として1回だけ索引する
+            rep = new_games[0]
+            moves16, keys16 = _replay(rep.initial_sfen,
+                                      rep.usi_moves[:prefix_len])
+            task_touched: set[int] = set()
+            _insert_game(conn, f"{path.stem}{TASK_SUFFIX}", date_str,
+                         label, rep.initial_sfen, moves16, keys16, 0,
+                         None, "task", task_touched)
+            _refresh_stats(conn, task_touched)
 
         touched = set()
         for game in new_games:
@@ -351,42 +366,48 @@ def list_batches(db_path: str | Path) -> list[dict]:
     return sorted(out, key=lambda b: b["date"], reverse=True)
 
 
+def _delete_batch_rows(conn: sqlite3.Connection, stem: str) -> int:
+    """バッチの games / position_games 行を削除する (台帳行は残す)。
+
+    position_games は各対局の moves を再生して完全な主キーで狙い撃ちする
+    (日付バックフィルと同じ手法)。commit は呼び出し側が行う。"""
+    games = conn.execute(
+        "SELECT game_id, started_at, initial_sfen, moves FROM games "
+        "WHERE event LIKE ?", (f"{stem}#%",)).fetchall()
+    touched: set[int] = set()
+    for game_id, started_at, initial_sfen, moves_blob in games:
+        moves = array.array("H")
+        moves.frombytes(moves_blob)
+        pos = Position()
+        if initial_sfen:
+            pos.set_sfen(initial_sfen)
+        else:
+            pos.set_hirate()
+        keys = [pos.position_key()]
+        for code in moves:
+            apply_move16(pos, code)
+            keys.append(pos.position_key())
+        sort_key = date_sort_key(started_at or "")
+        conn.executemany(
+            "DELETE FROM position_games WHERE position_key=? AND "
+            "sort_key=? AND game_id=? AND ply=?",
+            [(key, sort_key, game_id, ply) for ply, key in enumerate(keys)])
+        touched.update(keys)
+    _refresh_stats(conn, touched)
+    conn.execute("DELETE FROM games WHERE event LIKE ?", (f"{stem}#%",))
+    return len(games)
+
+
 def delete_batch(db_path: str | Path, path: str | Path,
                  log_line=None) -> int:
     """バッチ (擬似対局含む) をDBから完全に削除する。戻り値は削除対局数。
 
-    position_games は各対局の moves を再生して完全な主キーで狙い撃ちする
-    (日付バックフィルと同じ手法)。台帳行も消すので、再取り込みが可能になる
-    (= .sfen を編集して入れ直す手順)。全体を1トランザクションで行う。
-    """
+    台帳行も消すので、再取り込みが可能になる (= .sfen を編集して入れ直す
+    手順)。全体を1トランザクションで行う。"""
     path = Path(path)
-    stem = path.stem
     conn = open_for_write(db_path)
     try:
-        games = conn.execute(
-            "SELECT game_id, started_at, initial_sfen, moves FROM games "
-            "WHERE event LIKE ?", (f"{stem}#%",)).fetchall()
-        touched: set[int] = set()
-        for game_id, started_at, initial_sfen, moves_blob in games:
-            moves = array.array("H")
-            moves.frombytes(moves_blob)
-            pos = Position()
-            if initial_sfen:
-                pos.set_sfen(initial_sfen)
-            else:
-                pos.set_hirate()
-            keys = [pos.position_key()]
-            for code in moves:
-                apply_move16(pos, code)
-                keys.append(pos.position_key())
-            sort_key = date_sort_key(started_at or "")
-            conn.executemany(
-                "DELETE FROM position_games WHERE position_key=? AND "
-                "sort_key=? AND game_id=? AND ply=?",
-                [(key, sort_key, game_id, ply) for ply, key in enumerate(keys)])
-            touched.update(keys)
-        _refresh_stats(conn, touched)
-        conn.execute("DELETE FROM games WHERE event LIKE ?", (f"{stem}#%",))
+        deleted = _delete_batch_rows(conn, path.stem)
         conn.execute("DELETE FROM source_files WHERE path=?", (str(path),))
         conn.commit()
         try:
@@ -394,7 +415,7 @@ def delete_batch(db_path: str | Path, path: str | Path,
         except sqlite3.OperationalError:
             pass
         if log_line:
-            log_line(f"[{stem}] バッチ削除: {len(games)}件 (擬似対局含む)")
-        return len(games)
+            log_line(f"[{path.stem}] バッチ削除: {deleted}件 (擬似対局含む)")
+        return deleted
     finally:
         conn.close()
