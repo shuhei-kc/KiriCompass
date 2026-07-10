@@ -227,6 +227,9 @@ class PrecedentViewer:
             row=0, column=4, padx=(4, 0))
         self.auto_update_var = tk.BooleanVar(value=False)
         self.sfen_db_var = tk.StringVar(value=str(DEFAULT_SFEN_DB))
+        # floodgate更新の対象DB。ビューアの表示DBに追従させると、掘り棋譜DB等を
+        # 開いている間の自動サイクルがそちらへ取り込んでしまうため、固定で持つ。
+        self.fg_db_var = tk.StringVar(value="")
 
         ttk.Label(top, text="SFEN:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
         self.sfen_var = tk.StringVar()
@@ -549,18 +552,51 @@ class PrecedentViewer:
                 self._db_job_running = None
                 self.root.after(0, self._set_update_status)
 
-    def _current_db_or_warn(self, quiet: bool = False) -> str | None:
+    def _dialog_parent(self):
+        return (self._update_win if self._update_win is not None
+                and self._update_win.winfo_exists() else self.root)
+
+    def _db_has_sfen_games(self, db_path: str) -> bool:
+        """DBに掘り棋譜 (source='sfen') が入っているか。"""
+        try:
+            conn = open_read_only(db_path)
+            try:
+                return conn.execute("SELECT 1 FROM games WHERE source='sfen' "
+                                    "LIMIT 1").fetchone() is not None
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _floodgate_target_db(self, quiet: bool = False) -> str | None:
+        """floodgate更新の対象DB (固定設定)。無効なら通知して None。"""
+        db_path = self.fg_db_var.get().strip()
+        if not db_path or not Path(db_path).is_file():
+            message = "floodgate更新の対象DBが未指定か存在しません"
+            if quiet:
+                self._ulog(f"[floodgate] {message} のためスキップ")
+            else:
+                messagebox.showerror(
+                    "エラー", f"{message}。DB更新ウィンドウで指定してください。",
+                    parent=self._dialog_parent())
+            return None
+        if self._db_has_sfen_games(db_path):
+            message = ("対象DBに掘り棋譜 (sfen) が入っています。floodgateの"
+                       "取り込み先は実対局の前例DBにしてください")
+            if quiet:
+                self._ulog(f"[floodgate] {message} のためスキップ")
+            else:
+                messagebox.showerror("エラー", message,
+                                     parent=self._dialog_parent())
+            return None
+        return db_path
+
+    def _current_db_or_warn(self) -> str | None:
         db_path = self.db_var.get().strip()
         if not db_path or not Path(db_path).is_file():
-            if quiet:
-                # 自動実行時はダイアログを出さずログに残すだけ
-                self._ulog("[floodgate] 有効なDBが未指定のためスキップ")
-            else:
-                parent = (self._update_win
-                          if self._update_win is not None
-                          and self._update_win.winfo_exists() else self.root)
-                messagebox.showerror(
-                    "エラー", "有効なDBファイルを指定してください。", parent=parent)
+            messagebox.showerror(
+                "エラー", "有効なDBファイルを指定してください。",
+                parent=self._dialog_parent())
             return None
         return db_path
 
@@ -569,7 +605,7 @@ class PrecedentViewer:
         if self._floodgate_queued:
             self._ulog(f"[floodgate] 既にジョブが待機中のためスキップ ({label})")
             return
-        db_path = self._current_db_or_warn(quiet=quiet)
+        db_path = self._floodgate_target_db(quiet=quiet)
         if db_path is None:
             return
         self._floodgate_queued = True
@@ -585,6 +621,12 @@ class PrecedentViewer:
     def _enqueue_folder_ingest(self) -> None:
         db_path = self._current_db_or_warn()
         if db_path is None:
+            return
+        if self._db_has_sfen_games(db_path) and not messagebox.askyesno(
+                "確認", "現在のDBには掘り棋譜 (sfen) が入っています。実対局の"
+                        "棋譜は前例DBに取り込むことを推奨します。\n"
+                        "それでもこのDBに取り込みますか？",
+                parent=self._dialog_parent()):
             return
         folder = filedialog.askdirectory(
             title="取り込む棋譜フォルダを選択",
@@ -700,6 +742,22 @@ class PrecedentViewer:
 
         fg_frame = ttk.LabelFrame(win, text="floodgate 逐次更新", padding=8)
         fg_frame.pack(fill=tk.X, padx=8, pady=4)
+        target_row = ttk.Frame(fg_frame)
+        target_row.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(target_row, text="取り込み先DB:").pack(side=tk.LEFT)
+        ttk.Entry(target_row, textvariable=self.fg_db_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        def browse_fg_db():
+            chosen = filedialog.askopenfilename(
+                title="floodgateの取り込み先DBを選択", parent=win,
+                filetypes=[("SQLite DB", "*.db *.sqlite"), ("All", "*")])
+            if chosen:
+                self.fg_db_var.set(chosen)
+                self._save_config()
+
+        ttk.Button(target_row, text="参照...", command=browse_fg_db).pack(
+            side=tk.RIGHT)
         minutes = "/".join(f":{m:02d}" for m in AUTO_UPDATE_MINUTES)
         ttk.Checkbutton(
             fg_frame,
@@ -1305,6 +1363,9 @@ class PrecedentViewer:
             self.db_var.set(config.get("db_path", ""))
             self.sfen_var.set(config.get("last_sfen", ""))
             self.auto_update_var.set(bool(config.get("floodgate_auto_update")))
+            # 旧設定からの移行: 対象DB未設定なら当時のビューアDBを引き継ぐ
+            self.fg_db_var.set(config.get("floodgate_db_path")
+                               or config.get("db_path", ""))
             if config.get("sfen_db_path"):
                 self.sfen_db_var.set(config["sfen_db_path"])
             if config.get("sync_file"):
@@ -1319,6 +1380,7 @@ class PrecedentViewer:
                 "db_path": self.db_var.get().strip(),
                 "last_sfen": self.sfen_var.get().strip(),
                 "floodgate_auto_update": self.auto_update_var.get(),
+                "floodgate_db_path": self.fg_db_var.get().strip(),
                 "sfen_db_path": self.sfen_db_var.get().strip()},
                 ensure_ascii=False))
         except OSError:
