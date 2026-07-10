@@ -5,6 +5,8 @@ Usage:
     python3 tools/build_db.py <db_path> <kifu_folder> [--log build.log]
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys

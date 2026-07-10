@@ -10,6 +10,8 @@ GUIの「DB更新」ウィンドウと同じ kifudb.floodgate.update_once を
 呼ぶだけの薄いラッパー。
 """
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
