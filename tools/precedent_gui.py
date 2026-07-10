@@ -297,20 +297,18 @@ class PrecedentViewer:
         self._collapse_btn.pack(side=tk.RIGHT, anchor=tk.N, pady=4)
         panes.add(cand_holder, weight=1)
 
-        # 枠見出しを「前例 [名前フィルタ]」にする (labelwidgetで枠題に埋め込む)
+        # 枠見出しを「前例   [検索式] [対局者名検索]」にする (labelwidget)。
+        # 入力は取得に影響せず、ボタン (またはEnter) で初めて適用される。
         prec_header = ttk.Frame(panes)
         ttk.Label(prec_header, text="前例").pack(side=tk.LEFT)
         self.name_filter_var = tk.StringVar()
-        self.name_filter_var.trace_add(
-            "write", lambda *_args: self._apply_name_filter())
         name_entry = ttk.Entry(prec_header, textvariable=self.name_filter_var,
-                               width=16)
-        name_entry.pack(side=tk.LEFT, padx=(6, 0))
+                               width=22)
+        name_entry.pack(side=tk.LEFT, padx=(16, 0))
         name_entry.bind("<Return>", lambda _e: self._search_names_in_db())
-        # 逐次絞り込みは取得済みページ内のみ。深くに埋もれた名前はDB全体を走査
-        ttk.Button(prec_header, text="DB検索", width=7,
+        ttk.Button(prec_header, text="対局者名検索",
                    command=self._search_names_in_db).pack(
-            side=tk.LEFT, padx=(2, 0))
+            side=tk.LEFT, padx=(4, 0))
         prec_frame = ttk.LabelFrame(panes, labelwidget=prec_header)
 
         # 出典フィルタ。切り替えるとDBから絞り込み条件付きで1ページ取り直す
@@ -1221,55 +1219,23 @@ class PrecedentViewer:
             p.ply_count, p.source))
 
     def _search_names_in_db(self) -> None:
-        """名前フィルタをDB全体に適用して前例ページを取り直す。
+        """対局者名の検索式をDB全体に適用して前例ページを取り直す。
 
-        テキスト欄の逐次絞り込みは取得済みページ内しか見えないため、初期局面の
-        ように前例が多い局面では一致が深くに埋もれ得る。このボタンはDB側で
-        名前条件付きの走査を行う (レアな名前×前例100万局で数秒程度)。
-        空欄で押す (または欄を空にする) と解除され、通常のページに戻る。
-        出典フィルタ・「さらに表示」とも合成される。"""
+        記法: スペース=AND / 大文字OR・`|`=OR / -語=除外 (ANDがORより強い)。
+        各語は先手・後手どちらかの名前への部分一致 (大文字小文字無視)。
+        入力しただけでは何も起きず、このボタンかEnterで初めて適用される。
+        空欄で実行すると解除。レアな名前×前例100万局で数秒かかる。
+        出典フィルタ・「さらに表示」・SFEN再検索とも合成される。"""
         if self.query_position is None or self._search_running:
             return
         self._name_db_query = self.name_filter_var.get().strip() or None
         self._refetch_precedents()
 
-    def _name_matches(self, p) -> bool:
-        """名前フィルタ (大文字小文字を無視した部分一致) に合致するか。"""
-        query = self.name_filter_var.get().strip().lower()
-        return (not query or query in p.black_name.lower()
-                or query in p.white_name.lower())
-
-    def _apply_name_filter(self) -> None:
-        """名前フィルタの変更のたびに、ロード済みの前例一覧を書き換える。
-
-        DBへは再問い合わせしない (取得済み1000件単位の中を絞り込む)。
-        No. は取得時の順位のまま表示する。「DB検索」でDB側フィルタを適用中に
-        欄を空にしたら、フィルタ無しのページを取り直す。"""
-        if (not self.name_filter_var.get().strip()
-                and self._name_db_query and not self._search_running):
-            self._name_db_query = None
-            self._refetch_precedents()
-            return
-        self.prec_tv.delete(*self.prec_tv.get_children())
-        shown = 0
-        for index, p in enumerate(self.precedents):
-            if self._name_matches(p):
-                self._insert_prec_row(index, p)
-                shown += 1
-        if self.name_filter_var.get().strip():
-            self.status_var.set(
-                f"前例 {self._total_games}局 / 名前フィルタ一致 {shown}件 "
-                f"(取得済み {len(self.precedents)}件中)")
-        else:
-            self.status_var.set(
-                f"前例 {self._total_games}局 / 表示 {shown}件")
-
     def _append_precedents(self, page) -> None:
         """Append one page of precedents to the table (used by search & 続き)."""
         start = len(self.precedents)
         for offset, p in enumerate(page):
-            if self._name_matches(p):
-                self._insert_prec_row(start + offset, p)
+            self._insert_prec_row(start + offset, p)
         self.precedents.extend(page)
         # ページが満杯 = まだ続きがある可能性が高い
         self.more_button.config(

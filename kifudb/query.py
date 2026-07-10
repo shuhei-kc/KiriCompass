@@ -393,9 +393,11 @@ class PrecedentReader:
         通し番号 (絞り込み無しなら全体順位)。`start_rank` は続き取得時に
         前ページ最終行の rank を渡す。
 
-        `name_query`: 対局者名の部分一致 (ASCIIは大文字小文字を無視) で
-        絞り込む。名前は games 側にあるため走査中の結合が必要になり、
-        レアな名前×前例の多い局面では数秒かかることがある。
+        `name_query`: 対局者名の検索式。スペース区切り=AND、大文字の OR
+        または `|` =OR、`-語`=除外。AND が OR より強く結合する (OR で区切った
+        塊ごとに AND を評価)。各語は先手・後手どちらかの名前への部分一致
+        (ASCIIは大文字小文字を無視)。名前は games 側にあるため走査中の結合が
+        必要になり、レアな名前×前例の多い局面では数秒かかることがある。
         """
         key = position_key_from_sfen(normalize_sfen_main(sfen))
         condition, params = "", [key]
@@ -404,12 +406,9 @@ class PrecedentReader:
                          "(pg.sort_key = ? AND pg.game_id < ?)) ")
             params += [before[0], before[0], before[1]]
         if name_query:
-            escaped = (name_query.replace("\\", "\\\\")
-                       .replace("%", "\\%").replace("_", "\\_"))
-            pattern = f"%{escaped}%"
-            condition += ("AND (g.black_name LIKE ? ESCAPE '\\' "
-                          "OR g.white_name LIKE ? ESCAPE '\\') ")
-            params += [pattern, pattern]
+            name_sql, name_params = _name_query_condition(name_query)
+            condition += name_sql
+            params += name_params
         if sources is not None:
             try:
                 condition += self._source_condition(sources)
@@ -468,6 +467,46 @@ class PrecedentReader:
             detail.pvs_usi = [[move16_to_usi(m) for m in pv]
                               for pv in decode_pvs(analysis_row[1])]
         return detail
+
+
+def _name_query_condition(query: str) -> "tuple[str, list[str]]":
+    """対局者名の検索式を LIKE 条件のSQL断片に変換する。
+
+    記法は検索エンジンの慣習に合わせる: スペース=AND、大文字の OR または
+    `|` =OR、`-語`=除外。優先順位は AND > OR (ORで区切った塊ごとにANDを
+    評価する)。各語は先手・後手どちらかの名前への部分一致で、LIKE の
+    ワイルドカード文字はエスケープする。
+    """
+    def like(term: str) -> str:
+        escaped = (term.replace("\\", "\\\\")
+                   .replace("%", "\\%").replace("_", "\\_"))
+        return f"%{escaped}%"
+
+    groups: list[list[str]] = [[]]
+    for token in query.replace("|", " OR ").split():
+        if token == "OR":
+            if groups[-1]:
+                groups.append([])
+        else:
+            groups[-1].append(token)
+    groups = [g for g in groups if g]
+    if not groups:
+        return "", []
+
+    pair = ("(g.black_name LIKE ? ESCAPE '\\' "
+            "OR g.white_name LIKE ? ESCAPE '\\')")
+    group_sqls: list[str] = []
+    params: list[str] = []
+    for group in groups:
+        parts = []
+        for term in group:
+            negate = term.startswith("-") and len(term) > 1
+            if negate:
+                term = term[1:]
+            parts.append(("NOT " if negate else "") + pair)
+            params += [like(term), like(term)]
+        group_sqls.append("(" + " AND ".join(parts) + ")")
+    return "AND (" + " OR ".join(group_sqls) + ") ", params
 
 
 def compute_source_intervals(db_path: str | Path, progress=None,
