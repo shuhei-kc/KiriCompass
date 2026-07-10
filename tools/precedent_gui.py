@@ -18,6 +18,7 @@
 
 import json
 import queue
+import random
 import sys
 import threading
 import time
@@ -79,8 +80,11 @@ CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
 # floodgate逐次更新の一時保存フォルダ (取り込み後に削除される。詳細は
 # kifudb/floodgate.py)。未終局・エラーのファイルだけが一時的に残る。
 FLOODGATE_MIRROR = Path(__file__).resolve().parent.parent / "data" / "floodgate"
-# 自動更新の実行タイミング: 毎時この分に実行 (対局開始 :00/:30 の5分前)
+# 自動更新の実行タイミング: 毎時この分を窓の開始とし、ジッタ秒を足して実行
+# (対局開始 :00/:30 の5分前)。全利用者が同一秒にwdoorへ殺到しないよう、
+# 起動ごとのランダムなずれ (0〜AUTO_UPDATE_JITTER秒) で分散させる。
 AUTO_UPDATE_MINUTES = (25, 55)
+AUTO_UPDATE_JITTER = 180
 # 島表 (出典→game_id区間) の永続キャッシュ。DBが変わらない限り起動時の
 # 再計算 (gamesテーブル全走査) を丸ごと省ける。
 INTERVALS_CACHE_PATH = RUNTIME_DIR / "source_intervals.json"
@@ -174,6 +178,7 @@ class PrecedentViewer:
         self._db_job_running: str | None = None
         self._floodgate_queued = False   # floodgateジョブの重複投入防止
         self._auto_update_after: str | None = None  # スケジューラのafter ID
+        self._auto_jitter = random.randint(0, AUTO_UPDATE_JITTER)  # 群れ分散
         self._update_win: tk.Toplevel | None = None
         self._update_log_lines: list[str] = []  # ウィンドウ再表示用の履歴
 
@@ -621,7 +626,8 @@ class PrecedentViewer:
             return
         now = datetime.now()
         hour_base = now.replace(minute=0, second=0, microsecond=0)
-        candidates = [hour_base + timedelta(hours=h, minutes=m)
+        jitter = timedelta(seconds=self._auto_jitter)
+        candidates = [hour_base + timedelta(hours=h, minutes=m) + jitter
                       for h in (0, 1) for m in AUTO_UPDATE_MINUTES]
         self._auto_next_time = min(t for t in candidates if t > now)
         delay_ms = max(int((self._auto_next_time - now).total_seconds() * 1000),
@@ -688,7 +694,8 @@ class PrecedentViewer:
         minutes = "/".join(f":{m:02d}" for m in AUTO_UPDATE_MINUTES)
         ttk.Checkbutton(
             fg_frame,
-            text=f"毎時 {minutes} に新規棋譜を自動取り込み (対局開始5分前)",
+            text=f"毎時 {minutes} 過ぎに新規棋譜を自動取り込み"
+                 " (対局開始前。混雑回避のため数分内でランダムにずらす)",
             variable=self.auto_update_var,
             command=self._on_auto_update_toggle).pack(anchor=tk.W)
         row = ttk.Frame(fg_frame)

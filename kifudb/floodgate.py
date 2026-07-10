@@ -34,7 +34,7 @@ log = logging.getLogger("kifudb.floodgate")
 BASE_URL = "https://wdoor.c.u-tokyo.ac.jp/shogi/x"
 USER_AGENT = "KiriCompass-kifudb updater (github.com/shuhei-kc/KiriCompass)"
 REQUEST_TIMEOUT = 30
-DOWNLOAD_SLEEP = 0.1        # 連続ダウンロード間の小休止 (礼儀)
+DOWNLOAD_SLEEP = 0.2        # 連続ダウンロード間の小休止 (礼儀)
 JST = timezone(timedelta(hours=9))  # wdoorの日別ディレクトリはJST基準
 
 _CSA_HREF_RE = re.compile(r'href="([^"/]+\.csa)"')

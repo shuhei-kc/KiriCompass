@@ -42,10 +42,11 @@ ShogiHomeの検討モードで使うと、局面ごとに前例の候補手がmu
 python3 tools/lookup.py precedents.db "lnsgkgsnl/1r5b1/... b - 1" --out report.txt
 ```
 
-floodgateの新規棋譜を取り込む (cron等のヘッドレス運用向け。毎時 :25/:55 推奨):
+floodgateの新規棋譜を取り込む (cron等のヘッドレス運用向け。毎時 :25/:55 推奨。
+利用者全員が同一秒にサーバへ集中しないよう、ランダムな待ちを入れるのが行儀良い):
 
 ```bash
-python3 tools/update_floodgate.py precedents.db
+sleep $((RANDOM % 180)) && python3 tools/update_floodgate.py precedents.db
 ```
 
 前例ビューアの「DB更新...」ウィンドウでも同じことができる: フォルダ取り込みと、
