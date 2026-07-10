@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""前例ビューア (テストGUI): sfenを貼り付けて前例DBを検索する。
+"""KiriCompass 前例ビューア: sfenを貼り付けて前例DBを検索する。
 
 起動:  python3 tools/precedent_gui.py [db_path]
 
@@ -35,9 +35,8 @@ from kifudb.export import game_to_csa, safe_filename  # noqa: E402
 from kifudb.ki2 import format_pv_ki2, move16_to_ki2  # noqa: E402
 from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
                           PrecedentReader, REASON_JA,
-                          compute_source_intervals, format_report,
-                          tournament_label)
-from kifudb.db import open_read_only  # noqa: E402
+                          compute_source_intervals, tournament_label)
+from kifudb.db import open_for_write, open_read_only  # noqa: E402
 from kifudb.floodgate import update_once  # noqa: E402
 from kifudb.ingest import (KIFU_SUFFIXES, detect_source,  # noqa: E402
                            ingest_folder)
@@ -90,6 +89,10 @@ DEFAULT_SFEN_DB = Path(__file__).resolve().parent.parent / "data" / "sfen.db"
 # (floodgate/WCSC/電竜戦) は公開前例DBに集め、それ以外はこちらに自動振り分け
 # する — 公開DBを配布しても私的な棋譜が混ざらないようにするため。
 DEFAULT_PRIVATE_DB = Path(__file__).resolve().parent.parent / "data" / "private.db"
+# 公開前例DB (floodgate更新・公開棋譜取り込みの対象) の既定パス。配布された
+# サンプルDBを使う場合は「DB更新...」の「参照...」で選び直す。無ければ確認の
+# 上で空のDBを新規作成する (_ensure_db) ので、CLIなしでゼロから始められる。
+DEFAULT_PUBLIC_DB = Path(__file__).resolve().parent.parent / "data" / "csa.db"
 # 自動更新の実行タイミング: 毎時この分を窓の開始とし、ジッタ秒を足して実行。
 # :20/:50 + 0〜300秒 = 対局開始 (:00/:30) の5〜10分前のどこか。全利用者が
 # 同一秒にwdoorへ殺到しないよう、起動ごとのランダムなずれで分散させる。
@@ -232,7 +235,7 @@ class PrecedentViewer:
         self.sfen_db_var = tk.StringVar(value=str(DEFAULT_SFEN_DB))
         # floodgate更新・公開棋譜の取り込み先DB。ビューアの表示DBに追従させると
         # .sfen DB等を開いている間の自動サイクルが誤爆するため、固定で持つ。
-        self.fg_db_var = tk.StringVar(value="")
+        self.fg_db_var = tk.StringVar(value=str(DEFAULT_PUBLIC_DB))
         self.private_db_var = tk.StringVar(value=str(DEFAULT_PRIVATE_DB))
 
         ttk.Label(top, text="SFEN:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
@@ -290,9 +293,9 @@ class PrecedentViewer:
         ttk.Button(switch, text="DB更新...", width=9,
                    command=self._open_update_window).pack(fill=tk.X)
         self._db_switch_buttons: dict[str, ttk.Button] = {}
-        for i, (text_, kind) in enumerate((("csa", "public"),
-                                           ("private", "private"),
-                                           (".sfen", "sfen"))):
+        for i, (text_, kind) in enumerate((("Public", "public"),
+                                           ("Private", "private"),
+                                           ((".sfen"), "sfen"))):
             btn = ttk.Button(switch, text=text_, width=9,
                              command=lambda k=kind: self._switch_db(k))
             btn.pack(fill=tk.X, pady=(12, 1) if i == 0 else 1)
@@ -320,6 +323,11 @@ class PrecedentViewer:
         ttk.Button(prec_header, text="対局者名検索",
                    command=self._search_names_in_db).pack(
             side=tk.LEFT, padx=(4, 0))
+        # 名前フィルタの適用状態。局面切替で自動解除されても検索式は
+        # テキスト欄に残るため、適用中かどうかをここで明示する。
+        self.name_applied_var = tk.StringVar(value="")
+        ttk.Label(prec_header, textvariable=self.name_applied_var,
+                  foreground="#1a7f37").pack(side=tk.LEFT, padx=(6, 0))
         prec_frame = ttk.LabelFrame(panes, labelwidget=prec_header)
 
         # 出典フィルタ。切り替えるとDBから絞り込み条件付きで1ページ取り直す
@@ -393,8 +401,6 @@ class PrecedentViewer:
         self.status_var = tk.StringVar(value="DBとsfenを指定して検索してください。")
         # 右のボタン類を先に確保し、ステータスは残り幅に収めて切り詰める
         # (長いメッセージでもボタンを画面外へ押し出さないようにする)。
-        ttk.Button(bottom, text="レポート保存...",
-                   command=self._save_report).pack(side=tk.RIGHT)
         self.more_button = ttk.Button(bottom, text=f"さらに{PAGE_SIZE}件表示",
                                       command=self._load_more, state=tk.DISABLED)
         self.more_button.pack(side=tk.RIGHT, padx=6)
@@ -425,16 +431,24 @@ class PrecedentViewer:
                 self._reader.set_source_intervals(cached[0], cached[1])
         return self._reader
 
-    def search(self) -> None:
+    def search(self, quiet: bool = False) -> None:
+        """検索を開始する。quiet=True は追従など自動起点の検索で、
+        入力エラーをダイアログでなくステータスバーに出す (盤面GUIの操作の
+        たびにモーダルが出るのを防ぐ)。"""
         if self._search_running:
             return
         db_path = self.db_var.get().strip()
         sfen = self.sfen_var.get().strip()
         if not db_path or not Path(db_path).is_file():
-            messagebox.showerror("エラー", "有効なDBファイルを指定してください。")
+            message = "有効なDBファイルを指定してください。"
+            if quiet:
+                self.status_var.set(f"追従を保留中: {message}")
+            else:
+                messagebox.showerror("エラー", message)
             return
         if not sfen:
-            messagebox.showerror("エラー", "sfenを貼り付けてください。")
+            if not quiet:
+                messagebox.showerror("エラー", "sfenを貼り付けてください。")
             return
         self._save_config()
         self._prime_source_intervals()  # DBが変わっていたら先読みを開始
@@ -446,11 +460,13 @@ class PrecedentViewer:
         # 全走査が走ると切替のたびに重い)。検索式はテキスト欄に残るので、
         # 必要ならボタンで再適用する。
         self._name_db_query = None
+        self.name_applied_var.set("")
         threading.Thread(target=self._search_task,
-                         args=(db_path, sfen, self._enabled_sources()),
+                         args=(db_path, sfen, self._enabled_sources(), quiet),
                          daemon=True).start()
 
-    def _search_task(self, db_path: str, sfen: str, sources) -> None:
+    def _search_task(self, db_path: str, sfen: str, sources,
+                     quiet: bool = False) -> None:
         try:
             sfen_main = normalize_sfen_main(sfen)
             position = Position()
@@ -470,11 +486,14 @@ class PrecedentViewer:
                             precedents, total, elapsed, confluence,
                             transpositions, sources)
         except Exception as exc:  # noqa: BLE001 - surface everything to the user
-            self.root.after(0, self._show_error, str(exc))
+            self.root.after(0, self._show_error, str(exc), quiet)
 
-    def _show_error(self, message: str) -> None:
+    def _show_error(self, message: str, quiet: bool = False) -> None:
         self._search_running = False
         self.search_button.config(state=tk.NORMAL)
+        if quiet:  # 追従など自動起点の検索はダイアログを出さない
+            self.status_var.set(f"検索エラー: {message}")
+            return
         self.status_var.set("エラー")
         messagebox.showerror("検索エラー", message)
 
@@ -493,7 +512,7 @@ class PrecedentViewer:
             code = usi_to_move16(c.usi)
             label = (move16_to_ki2(position, code) if code is not None
                      else "(終局)" if c.usi == "(end)" else c.usi)
-            # 引き分けは後手勝ち扱いで先手勝率を算出する
+            # 先手勝率 = 先手勝 ÷ (先手勝 + 後手勝 + 引分)
             decided = c.black_wins + c.white_wins + c.draws
             rate = f"{c.black_wins / decided * 100:.1f}%" if decided else "-"
             merged = confluence.get(c.usi, 0)
@@ -610,8 +629,8 @@ class PrecedentViewer:
             except OSError:
                 return path
         current = norm(self.db_var.get())
-        for kind, (label, var) in (("public", ("csa", self.fg_db_var)),
-                                   ("private", ("private", self.private_db_var)),
+        for kind, (label, var) in (("public", ("Public", self.fg_db_var)),
+                                   ("private", ("Private", self.private_db_var)),
                                    ("sfen", ((".sfen"), self.sfen_db_var))):
             active = current and norm(var.get()) == current
             self._db_switch_buttons[kind].config(
@@ -633,7 +652,7 @@ class PrecedentViewer:
             sfen = self.sfen_var.get().strip()  # syncが無ければ前回のSFEN
         if sfen and not self._search_running:
             self.sfen_var.set(sfen)
-            self.search()
+            self.search(quiet=True)
 
     def _toggle_top_rows(self) -> None:
         """DB行・SFEN行を収納/展開する (盤面GUI追従で使う際の省スペース化)。
@@ -648,17 +667,21 @@ class PrecedentViewer:
         self._collapse_btn.config(text="▼" if self._top_collapsed else "▲")
 
     def _switch_db(self, kind: str) -> None:
-        """csa.db / private.db / sfen.db をワンクリックで切り替える。
+        """Public / Private / .sfen のDBをワンクリックで切り替える。
 
-        切り替え時は出典フィルタを全てONに戻し、現在のsfenで表示を更新する。"""
-        var = {"public": self.fg_db_var, "private": self.private_db_var,
-               "sfen": self.sfen_db_var}[kind]
+        切り替え時は出典フィルタを全てONに戻し、現在のsfenで表示を更新する。
+        切り替え先のDBファイルが無ければ新規作成を提案する。"""
+        var, role = {"public": (self.fg_db_var, "公開前例DB"),
+                     "private": (self.private_db_var, "プライベートDB"),
+                     "sfen": (self.sfen_db_var, ".sfen DB")}[kind]
         db_path = var.get().strip()
-        if not db_path or not Path(db_path).is_file():
+        if not db_path:
             messagebox.showerror(
-                "エラー", f"切り替え先のDBがありません: {db_path or '(未設定)'}\n"
+                "エラー", "切り替え先のDBが未設定です。"
                           "「DB更新...」ウィンドウでパスを設定してください。",
                 parent=self.root)
+            return
+        if not self._ensure_db(db_path, role):
             return
         self.db_var.set(db_path)
         for filter_var in self.source_filter_vars.values():
@@ -670,6 +693,30 @@ class PrecedentViewer:
     def _dialog_parent(self):
         return (self._update_win if self._update_win is not None
                 and self._update_win.winfo_exists() else self.root)
+
+    def _ensure_db(self, db_path: str, role: str) -> bool:
+        """DBファイルが無ければ、確認の上で空のDBを新規作成する。
+
+        配布されたサンプルDBを「参照...」で選ぶ使い方と、ゼロから作って
+        取り込みを始める使い方の両方を想定する。戻り値: 使える状態なら True。"""
+        if Path(db_path).is_file():
+            return True
+        if not messagebox.askyesno(
+                "確認", f"{role}がまだありません:\n{db_path}\n\n"
+                        "空のDBを新規作成しますか？\n"
+                        "(既存のDBを使う場合は「いいえ」を選び、"
+                        "「参照...」でファイルを指定してください)",
+                parent=self._dialog_parent()):
+            return False
+        try:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            open_for_write(db_path).close()
+        except Exception as exc:  # noqa: BLE001 - パス不正・権限などをそのまま提示
+            messagebox.showerror("エラー", f"DBを作成できませんでした: {exc}",
+                                 parent=self._dialog_parent())
+            return False
+        self._ulog(f"[DB] 新規作成: {db_path}")
+        return True
 
     def _db_has_sfen_games(self, db_path: str) -> bool:
         """.sfen連続対局 (source='sfen') が入っているか。"""
@@ -684,10 +731,13 @@ class PrecedentViewer:
             return False
 
     def _floodgate_target_db(self, quiet: bool = False) -> str | None:
-        """floodgate更新の対象DB (固定設定)。無効なら通知して None。"""
+        """floodgate更新の対象DB (固定設定)。無効なら通知して None。
+
+        手動操作 (quiet=False) でDBファイルが無ければ新規作成を提案する。
+        自動更新 (quiet=True) はダイアログを出せないためログに残してスキップ。"""
         db_path = self.fg_db_var.get().strip()
-        if not db_path or not Path(db_path).is_file():
-            message = "floodgate更新の対象DBが未指定か存在しません"
+        if not db_path:
+            message = "公開前例DBが未指定です"
             if quiet:
                 self._ulog(f"[floodgate] {message} のためスキップ")
             else:
@@ -695,6 +745,13 @@ class PrecedentViewer:
                     "エラー", f"{message}。DB更新ウィンドウで指定してください。",
                     parent=self._dialog_parent())
             return None
+        if not Path(db_path).is_file():
+            if quiet:
+                self._ulog(f"[floodgate] 公開前例DBが存在しません"
+                           f" ({db_path}) のためスキップ")
+                return None
+            if not self._ensure_db(db_path, "公開前例DB"):
+                return None
         if self._db_has_sfen_games(db_path):
             message = ("対象DBに.sfen連続対局が入っています。floodgateの"
                        "取り込み先は実対局の前例DBにしてください")
@@ -796,7 +853,7 @@ class PrecedentViewer:
             if reader is not None and reader.db_path == db_path:
                 reader.set_source_intervals(new_iv, new_mg)
 
-    # -- 自動更新スケジューラ (毎時 :25/:55、壁時計アンカー) ----------------
+    # -- 自動更新スケジューラ (毎時 :20/:50 + ジッタ、壁時計アンカー) --------
 
     def _schedule_auto_update(self) -> None:
         if self._auto_update_after is not None:
@@ -1272,10 +1329,12 @@ class PrecedentViewer:
         入力しただけでは何も起きず、このボタンかEnterで初めて適用される。
         空欄で実行すると解除。レアな名前×前例100万局で数秒かかる。
         出典フィルタ・「さらに表示」とは合成されるが、局面を切り替えると
-        解除される (検索式は残るので、ボタンで再適用できる)。"""
+        解除される (検索式は残るので、ボタンで再適用できる)。適用中かどうかは
+        ボタン横の「適用中」表示で分かる。"""
         if self.query_position is None or self._search_running:
             return
         self._name_db_query = self.name_filter_var.get().strip() or None
+        self.name_applied_var.set("適用中" if self._name_db_query else "")
         self._refetch_precedents()
 
     def _append_precedents(self, page) -> None:
@@ -1495,22 +1554,6 @@ class PrecedentViewer:
         self.detail_text.insert("1.0", text)
         self.detail_text.config(state=tk.DISABLED)
 
-    def _save_report(self) -> None:
-        if self.query_position is None:
-            messagebox.showinfo("情報", "先に検索してください。")
-            return
-        path = filedialog.asksaveasfilename(
-            title="レポート保存", defaultextension=".txt",
-            filetypes=[("Text", "*.txt")])
-        if not path:
-            return
-        candidates, precedents, total = self._get_reader(
-            self.db_var.get().strip()).lookup(self.sfen_var.get().strip())
-        report = format_report(self.sfen_var.get().strip(), candidates,
-                               precedents, total)
-        Path(path).write_text(report, encoding="utf-8")
-        self.status_var.set(f"保存しました: {path}")
-
     # -- 将棋盤GUIの局面追従 (sync) -----------------------------------------
 
     def _on_sync_toggle(self) -> None:
@@ -1544,7 +1587,7 @@ class PrecedentViewer:
         if sfen and sfen != self.sfen_var.get().strip():
             self.sfen_var.set(sfen)
             if self.db_var.get().strip():
-                self.search()
+                self.search(quiet=True)
 
     # -- config ----------------------------------------------------------
 
@@ -1555,9 +1598,11 @@ class PrecedentViewer:
             self.sfen_var.set(config.get("last_sfen", ""))
             self.auto_update_var.set(bool(config.get("floodgate_auto_update")))
             self.sync_var.set(bool(config.get("sync_follow", True)))
-            # 旧設定からの移行: 対象DB未設定なら当時のビューアDBを引き継ぐ
+            # 旧設定からの移行: 対象DB未設定なら当時のビューアDB、それも
+            # 無ければ既定パス (data/csa.db) を使う
             self.fg_db_var.set(config.get("floodgate_db_path")
-                               or config.get("db_path", ""))
+                               or config.get("db_path")
+                               or str(DEFAULT_PUBLIC_DB))
             if config.get("private_db_path"):
                 self.private_db_var.set(config["private_db_path"])
             if config.get("sfen_db_path"):
