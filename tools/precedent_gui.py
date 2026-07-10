@@ -202,6 +202,8 @@ class PrecedentViewer:
         threading.Thread(target=self._db_worker, daemon=True).start()
         self._schedule_auto_update()
         self._poll_sync_file()
+        # 追従ONなら起動直後に現在局面を表示するところまで行う
+        self.root.after(200, self._initial_sync_search)
 
     def _setup_fonts(self) -> None:
         import tkinter.font as tkfont
@@ -287,11 +289,19 @@ class PrecedentViewer:
         # 候補手の右: 3系統DB切替。DB行/SFEN行の収納トグルはウィンドウ右端。
         switch = ttk.Frame(cand_holder)
         switch.pack(side=tk.LEFT, anchor=tk.N, padx=(10, 0), pady=4)
+        self._db_switch_buttons: dict[str, ttk.Button] = {}
         for text_, kind in (("csa", "public"), ("private", "private"),
                             (".sfen", "sfen")):
-            ttk.Button(switch, text=text_, width=7,
-                       command=lambda k=kind: self._switch_db(k)).pack(
-                fill=tk.X, pady=1)
+            btn = ttk.Button(switch, text=text_, width=9,
+                             command=lambda k=kind: self._switch_db(k))
+            btn.pack(fill=tk.X, pady=1)
+            self._db_switch_buttons[kind] = btn
+        # 選択中のDBをボタンの ● 印で示す (パス編集にも追従)
+        for var in (self.db_var, self.fg_db_var, self.private_db_var,
+                    self.sfen_db_var):
+            var.trace_add("write",
+                          lambda *_args: self._update_db_switch_marks())
+        self._update_db_switch_marks()
         self._collapse_btn = ttk.Button(cand_holder, text="▲", width=2,
                                         command=self._toggle_top_rows)
         self._collapse_btn.pack(side=tk.RIGHT, anchor=tk.N, pady=4)
@@ -589,6 +599,40 @@ class PrecedentViewer:
             finally:
                 self._db_job_running = None
                 self.root.after(0, self._set_update_status)
+
+    def _update_db_switch_marks(self) -> None:
+        """ビューアが開いているDBに対応する切替ボタンへ ● を付ける。"""
+        def norm(path: str) -> str:
+            path = path.strip()
+            try:
+                return str(Path(path).resolve()) if path else ""
+            except OSError:
+                return path
+        current = norm(self.db_var.get())
+        for kind, (label, var) in (("public", ("csa", self.fg_db_var)),
+                                   ("private", ("private", self.private_db_var)),
+                                   ("sfen", ((".sfen"), self.sfen_db_var))):
+            active = current and norm(var.get()) == current
+            self._db_switch_buttons[kind].config(
+                text=("● " if active else "") + label)
+
+    def _initial_sync_search(self) -> None:
+        """起動直後: 追従ONなら現在のsync局面を即座に検索・表示する。
+
+        通常のポーリングは「変化」しか反応しないため、前回終了時と同じ局面が
+        syncファイルに残っていると起動しても何も表示されない。ここで一度だけ
+        明示的に適用する (syncファイルが無ければ前回のSFENで表示)。"""
+        if not self.sync_var.get() or not self.db_var.get().strip():
+            return
+        try:
+            data = json.loads(self._sync_file.read_text(encoding="utf-8"))
+            sfen = data["sfen"]
+            self._sync_mtime = self._sync_file.stat().st_mtime
+        except (OSError, json.JSONDecodeError, KeyError):
+            sfen = self.sfen_var.get().strip()  # syncが無ければ前回のSFEN
+        if sfen and not self._search_running:
+            self.sfen_var.set(sfen)
+            self.search()
 
     def _toggle_top_rows(self) -> None:
         """DB行・SFEN行を収納/展開する (盤面GUI追従で使う際の省スペース化)。
