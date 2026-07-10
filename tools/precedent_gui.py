@@ -227,14 +227,6 @@ class PrecedentViewer:
         ttk.Button(top, text="参照...", command=self._browse_db).grid(row=0, column=2)
         ttk.Button(top, text="DB更新...", command=self._open_update_window).grid(
             row=0, column=3, padx=(4, 0))
-        # 3系統DB (公開csa / private / .sfen) のワンクリック切替
-        switch = ttk.Frame(top)
-        switch.grid(row=0, column=4, padx=(8, 0))
-        for text_, kind in (("csa", "public"), ("private", "private"),
-                            (".sfen", "sfen")):
-            ttk.Button(switch, text=text_, width=6,
-                       command=lambda k=kind: self._switch_db(k)).pack(
-                side=tk.LEFT, padx=1)
         self.auto_update_var = tk.BooleanVar(value=False)
         self.sfen_db_var = tk.StringVar(value=str(DEFAULT_SFEN_DB))
         # floodgate更新・公開棋譜の取り込み先DB。ビューアの表示DBに追従させると
@@ -251,12 +243,21 @@ class PrecedentViewer:
         self.search_button = ttk.Button(top, text="検索", command=self.search)
         self.search_button.grid(row=1, column=2, pady=(6, 0))
 
+        # 追従チェックは検索ボタンの右
         self.sync_var = tk.BooleanVar(value=True)  # 既定で追従ON
         sync_check = ttk.Checkbutton(
             top, text="将棋盤GUIの局面を追従",
             variable=self.sync_var, command=self._on_sync_toggle)
-        sync_check.grid(row=2, column=1, sticky=tk.W, padx=4, pady=(6, 0))
+        sync_check.grid(row=1, column=3, sticky=tk.W, padx=(6, 0), pady=(6, 0))
         top.columnconfigure(1, weight=1)
+
+        # DB行・SFEN行をボタンひとつで収納/展開 (ボタン自体は常時見える)
+        self._top_collapsibles = list(top.grid_slaves())
+        self._top_collapsed = False
+        self._collapse_btn = ttk.Button(top, text="▲", width=2,
+                                        command=self._toggle_top_rows)
+        self._collapse_btn.grid(row=0, column=4, rowspan=2,
+                                sticky=tk.NE, padx=(6, 0))
 
         panes = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
         panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -284,6 +285,14 @@ class PrecedentViewer:
                                     command=self.cand_tv.yview)
         self.cand_tv.configure(yscrollcommand=cand_scroll.set)
         cand_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # 3系統DB (csa / private / .sfen) のワンクリック切替を候補手の右に
+        switch = ttk.Frame(cand_holder)
+        switch.pack(side=tk.LEFT, anchor=tk.N, padx=(10, 0), pady=4)
+        for text_, kind in (("csa", "public"), ("private", "private"),
+                            (".sfen", "sfen")):
+            ttk.Button(switch, text=text_, width=7,
+                       command=lambda k=kind: self._switch_db(k)).pack(
+                fill=tk.X, pady=1)
         panes.add(cand_holder, weight=1)
 
         prec_frame = ttk.LabelFrame(panes, text="前例")
@@ -562,6 +571,18 @@ class PrecedentViewer:
             finally:
                 self._db_job_running = None
                 self.root.after(0, self._set_update_status)
+
+    def _toggle_top_rows(self) -> None:
+        """DB行・SFEN行を収納/展開する (盤面GUI追従で使う際の省スペース化)。
+
+        grid_remove は配置設定を覚えたまま隠すので、再表示で元に戻る。"""
+        self._top_collapsed = not self._top_collapsed
+        for widget in self._top_collapsibles:
+            if self._top_collapsed:
+                widget.grid_remove()
+            else:
+                widget.grid()
+        self._collapse_btn.config(text="▼" if self._top_collapsed else "▲")
 
     def _switch_db(self, kind: str) -> None:
         """csa.db / private.db / sfen.db をワンクリックで切り替える。
