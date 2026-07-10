@@ -431,13 +431,15 @@ class PrecedentViewer:
         self.search_button.config(state=tk.DISABLED)
         self.status_var.set("検索中...")
         # フィルタ状態は tk 変数なのでメインスレッドで読み取って渡す
+        # 局面の切り替えでは対局者名フィルタを解除する (レアな名前のまま
+        # 全走査が走ると切替のたびに重い)。検索式はテキスト欄に残るので、
+        # 必要ならボタンで再適用する。
+        self._name_db_query = None
         threading.Thread(target=self._search_task,
-                         args=(db_path, sfen, self._enabled_sources(),
-                               self._name_db_query),
+                         args=(db_path, sfen, self._enabled_sources()),
                          daemon=True).start()
 
-    def _search_task(self, db_path: str, sfen: str, sources,
-                     name_query=None) -> None:
+    def _search_task(self, db_path: str, sfen: str, sources) -> None:
         try:
             sfen_main = normalize_sfen_main(sfen)
             position = Position()
@@ -449,8 +451,7 @@ class PrecedentViewer:
             if sources is not None:
                 self._wait_interval_prep(db_path)
             precedents = reader.precedents_page(sfen, limit=PAGE_SIZE,
-                                                sources=sources,
-                                                name_query=name_query)
+                                                sources=sources)
             confluence = reader.confluence_counts(sfen, candidates)
             transpositions = reader.transposition_moves(sfen, candidates)
             elapsed = (time.perf_counter() - started) * 1000
@@ -1225,7 +1226,8 @@ class PrecedentViewer:
         各語は先手・後手どちらかの名前への部分一致 (大文字小文字無視)。
         入力しただけでは何も起きず、このボタンかEnterで初めて適用される。
         空欄で実行すると解除。レアな名前×前例100万局で数秒かかる。
-        出典フィルタ・「さらに表示」・SFEN再検索とも合成される。"""
+        出典フィルタ・「さらに表示」とは合成されるが、局面を切り替えると
+        解除される (検索式は残るので、ボタンで再適用できる)。"""
         if self.query_position is None or self._search_running:
             return
         self._name_db_query = self.name_filter_var.get().strip() or None
