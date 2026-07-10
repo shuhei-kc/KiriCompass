@@ -17,10 +17,12 @@
 """
 
 import json
+import queue
 import sys
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import tkinter as tk
@@ -35,6 +37,9 @@ from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
                           compute_source_intervals, format_report,
                           tournament_label)
 from kifudb.db import open_read_only  # noqa: E402
+from kifudb.floodgate import update_once  # noqa: E402
+from kifudb.ingest import ingest_folder  # noqa: E402
+from kifudb.query import extend_source_intervals  # noqa: E402
 from kifudb.usi import DEFAULT_SYNC_FILE, RUNTIME_DIR  # noqa: E402
 
 SYNC_POLL_MS = 300
@@ -71,6 +76,11 @@ def pick_mono_font(root: tk.Tk) -> str:
     return "TkFixedFont"
 
 CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
+# floodgate逐次更新の一時保存フォルダ (取り込み後に削除される。詳細は
+# kifudb/floodgate.py)。未終局・エラーのファイルだけが一時的に残る。
+FLOODGATE_MIRROR = Path(__file__).resolve().parent.parent / "data" / "floodgate"
+# 自動更新の実行タイミング: 毎時この分に実行 (対局開始 :00/:30 の5分前)
+AUTO_UPDATE_MINUTES = (25, 55)
 # 島表 (出典→game_id区間) の永続キャッシュ。DBが変わらない限り起動時の
 # 再計算 (gamesテーブル全走査) を丸ごと省ける。
 INTERVALS_CACHE_PATH = RUNTIME_DIR / "source_intervals.json"
@@ -81,7 +91,7 @@ def load_interval_sidecar(db_path: str):
 
     DBの MAX(game_id) と総対局数が保存時と一致する場合だけ採用する
     (増分取り込みや再構築があれば不一致になり、呼び出し側が再計算する)。
-    戻り値: (intervals, max_gid) または None。"""
+    戻り値: (intervals, max_gid, count) または None。"""
     try:
         data = json.loads(INTERVALS_CACHE_PATH.read_text(encoding="utf-8"))
         entry = data[str(Path(db_path).resolve())]
@@ -93,7 +103,7 @@ def load_interval_sidecar(db_path: str):
             conn.close()
         if entry["max_gid"] != max_gid or entry["count"] != count:
             return None
-        return [tuple(iv) for iv in entry["intervals"]], max_gid
+        return [tuple(iv) for iv in entry["intervals"]], max_gid, count
     except Exception:  # noqa: BLE001 - 壊れた/無いキャッシュは再計算で賄う
         return None
 
@@ -156,8 +166,16 @@ class PrecedentViewer:
         self._sync_file = DEFAULT_SYNC_FILE  # runtime/gui_config.json で上書き可
         self._reader: PrecedentReader | None = None
         # 出典絞り込み用の島表 (query.py参照) の先読み管理
-        self._interval_cache: dict[str, tuple] = {}          # db_path -> (islands, max_gid)
+        self._interval_cache: dict[str, tuple] = {}   # db_path -> (islands, max_gid, count)
         self._interval_jobs: dict[str, threading.Event] = {}  # 実行中の先読み
+        # DB更新 (フォルダ取り込み / floodgate)。書き込みジョブは1本のキューで
+        # 直列化し、決して同時にDBへ書かない。読み取り (検索) とはWALで共存。
+        self._db_jobs: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        self._db_job_running: str | None = None
+        self._floodgate_queued = False   # floodgateジョブの重複投入防止
+        self._auto_update_after: str | None = None  # スケジューラのafter ID
+        self._update_win: tk.Toplevel | None = None
+        self._update_log_lines: list[str] = []  # ウィンドウ再表示用の履歴
 
         self._setup_fonts()
         self._build_widgets()
@@ -165,6 +183,8 @@ class PrecedentViewer:
         if len(sys.argv) > 1:
             self.db_var.set(sys.argv[1])
         self._prime_source_intervals()  # 起動直後から先読みを始める
+        threading.Thread(target=self._db_worker, daemon=True).start()
+        self._schedule_auto_update()
         self._poll_sync_file()
 
     def _setup_fonts(self) -> None:
@@ -190,6 +210,9 @@ class PrecedentViewer:
         ttk.Entry(top, textvariable=self.db_var).grid(
             row=0, column=1, sticky=tk.EW, padx=4)
         ttk.Button(top, text="参照...", command=self._browse_db).grid(row=0, column=2)
+        ttk.Button(top, text="DB更新...", command=self._open_update_window).grid(
+            row=0, column=3, padx=(4, 0))
+        self.auto_update_var = tk.BooleanVar(value=False)
 
         ttk.Label(top, text="SFEN:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
         self.sfen_var = tk.StringVar()
@@ -313,6 +336,10 @@ class PrecedentViewer:
         self.more_button = ttk.Button(bottom, text=f"さらに{PAGE_SIZE}件表示",
                                       command=self._load_more, state=tk.DISABLED)
         self.more_button.pack(side=tk.RIGHT, padx=6)
+        # DB更新の稼働表示 (自動更新ON時に「次回 :55」等を控えめに出す)
+        self.update_status_var = tk.StringVar(value="")
+        ttk.Label(bottom, textvariable=self.update_status_var,
+                  foreground="gray").pack(side=tk.RIGHT, padx=(0, 8))
         ttk.Label(bottom, textvariable=self.status_var, anchor=tk.W).pack(
             side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -333,7 +360,7 @@ class PrecedentViewer:
             self._reader = PrecedentReader(db_path)
             cached = self._interval_cache.get(db_path)
             if cached:
-                self._reader.set_source_intervals(*cached)
+                self._reader.set_source_intervals(cached[0], cached[1])
         return self._reader
 
     def search(self) -> None:
@@ -447,7 +474,7 @@ class PrecedentViewer:
                 # 前回起動時の結果が有効ならそれを使い、全走査を省く
                 cached = load_interval_sidecar(db_path)
                 if cached is not None:
-                    intervals, max_gid = cached
+                    intervals, max_gid, count = cached
                 else:
                     intervals, max_gid, count = compute_source_intervals(
                         db_path, progress)
@@ -455,7 +482,7 @@ class PrecedentViewer:
                         save_interval_sidecar(db_path, intervals,
                                               max_gid, count)
                 if max_gid is not None:
-                    self._interval_cache[db_path] = (intervals, max_gid)
+                    self._interval_cache[db_path] = (intervals, max_gid, count)
                     # 属性の設定のみで接続は触らないためスレッドから直接
                     # 入れてよい。event を待つ検索スレッドが即座に使える。
                     reader = self._reader
@@ -486,6 +513,220 @@ class PrecedentViewer:
         event = self._interval_jobs.get(db_path)
         if event is not None:
             event.wait(timeout=15.0)
+
+    # -- DB更新 (フォルダ取り込み / floodgate逐次更新) ---------------------
+
+    def _db_worker(self) -> None:
+        """書き込みジョブを直列実行するワーカー (デーモンスレッド)。
+
+        フォルダ取り込みと floodgate 更新はすべてこのキューを通るので、
+        DBへ同時に書くジョブは存在しない。検索 (読み取り) とはWALで共存。"""
+        while True:
+            kind, fn = self._db_jobs.get()
+            if kind == "floodgate":
+                self._floodgate_queued = False
+            self._db_job_running = kind
+            self.root.after(0, self._set_update_status)
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001 - 次のジョブは続行する
+                self._ulog(f"[{kind}] 失敗: {exc}")
+            finally:
+                self._db_job_running = None
+                self.root.after(0, self._set_update_status)
+
+    def _current_db_or_warn(self, quiet: bool = False) -> str | None:
+        db_path = self.db_var.get().strip()
+        if not db_path or not Path(db_path).is_file():
+            if quiet:
+                # 自動実行時はダイアログを出さずログに残すだけ
+                self._ulog("[floodgate] 有効なDBが未指定のためスキップ")
+            else:
+                parent = (self._update_win
+                          if self._update_win is not None
+                          and self._update_win.winfo_exists() else self.root)
+                messagebox.showerror(
+                    "エラー", "有効なDBファイルを指定してください。", parent=parent)
+            return None
+        return db_path
+
+    def _enqueue_floodgate(self, label: str, days: int = 2,
+                           quiet: bool = False) -> None:
+        if self._floodgate_queued:
+            self._ulog(f"[floodgate] 既にジョブが待機中のためスキップ ({label})")
+            return
+        db_path = self._current_db_or_warn(quiet=quiet)
+        if db_path is None:
+            return
+        self._floodgate_queued = True
+
+        def job():
+            self._ulog(f"[floodgate] 更新開始 ({label}, 過去{days}日分を照合)")
+            update_once(db_path, FLOODGATE_MIRROR, days=days,
+                        log_line=lambda m: self._ulog(f"[floodgate] {m}"))
+            self._after_db_update(db_path)
+
+        self._db_jobs.put(("floodgate", job))
+
+    def _enqueue_folder_ingest(self) -> None:
+        db_path = self._current_db_or_warn()
+        if db_path is None:
+            return
+        folder = filedialog.askdirectory(
+            title="取り込む棋譜フォルダを選択",
+            parent=self._update_win or self.root)
+        if not folder:
+            return
+
+        def job():
+            self._ulog(f"[取り込み] 開始: {folder}")
+            stats = ingest_folder(
+                db_path, folder,
+                progress=lambda i, n: self._ulog(f"[取り込み] {i}/{n}"))
+            self._ulog(f"[取り込み] 完了: {stats.summary()}")
+            self._after_db_update(db_path)
+
+        self._db_jobs.put(("フォルダ取り込み", job))
+
+    def _after_db_update(self, db_path: str) -> None:
+        """取り込み後の島表の差分更新 (workerスレッドで実行)。
+
+        追加分 (旧max_gid以降) だけ走査して島表にマージするので、逐次更新の
+        たびに全走査へ戻らない。先読み前なら何もしない (次の絞り込みで計算)。"""
+        cached = self._interval_cache.get(db_path)
+        if not cached:
+            return
+        intervals, max_gid, count = cached
+        try:
+            new_iv, new_mg, added = extend_source_intervals(
+                db_path, intervals, max_gid)
+        except Exception:  # noqa: BLE001 - 失敗時は次回フル再計算に任せる
+            self._interval_cache.pop(db_path, None)
+            return
+        if added:
+            self._interval_cache[db_path] = (new_iv, new_mg, count + added)
+            save_interval_sidecar(db_path, new_iv, new_mg, count + added)
+            reader = self._reader
+            if reader is not None and reader.db_path == db_path:
+                reader.set_source_intervals(new_iv, new_mg)
+
+    # -- 自動更新スケジューラ (毎時 :25/:55、壁時計アンカー) ----------------
+
+    def _schedule_auto_update(self) -> None:
+        if self._auto_update_after is not None:
+            self.root.after_cancel(self._auto_update_after)
+            self._auto_update_after = None
+        if not self.auto_update_var.get():
+            self._set_update_status()
+            return
+        now = datetime.now()
+        hour_base = now.replace(minute=0, second=0, microsecond=0)
+        candidates = [hour_base + timedelta(hours=h, minutes=m)
+                      for h in (0, 1) for m in AUTO_UPDATE_MINUTES]
+        self._auto_next_time = min(t for t in candidates if t > now)
+        delay_ms = max(int((self._auto_next_time - now).total_seconds() * 1000),
+                       1000)
+        self._auto_update_after = self.root.after(delay_ms,
+                                                  self._auto_update_fire)
+        self._set_update_status()
+
+    def _auto_update_fire(self) -> None:
+        self._auto_update_after = None
+        self._enqueue_floodgate("自動", quiet=True)
+        self._schedule_auto_update()
+
+    def _on_auto_update_toggle(self) -> None:
+        self._save_config()
+        self._schedule_auto_update()
+
+    def _set_update_status(self) -> None:
+        parts = []
+        if self._db_job_running:
+            parts.append(f"DB更新中: {self._db_job_running}")
+        if self.auto_update_var.get() and self._auto_update_after is not None:
+            parts.append(f"自動更新 次回 {self._auto_next_time:%H:%M}")
+        self.update_status_var.set(" / ".join(parts))
+
+    def _ulog(self, message: str) -> None:
+        """更新ログ1行 (どのスレッドからでも呼べる)。"""
+        line = f"{datetime.now():%H:%M:%S} {message}"
+
+        def append():
+            self._update_log_lines.append(line)
+            del self._update_log_lines[:-500]
+            widget = getattr(self, "_update_log_text", None)
+            if widget is not None and widget.winfo_exists():
+                widget.config(state=tk.NORMAL)
+                widget.insert(tk.END, line + "\n")
+                widget.see(tk.END)
+                widget.config(state=tk.DISABLED)
+
+        self.root.after(0, append)
+
+    # -- DB更新ウィンドウ ---------------------------------------------------
+
+    def _open_update_window(self) -> None:
+        if self._update_win is not None and self._update_win.winfo_exists():
+            self._update_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        win.title("DB更新")
+        win.geometry("680x480")
+        self._update_win = win
+
+        folder_frame = ttk.LabelFrame(win, text="フォルダ取り込み", padding=8)
+        folder_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
+        ttk.Button(folder_frame, text="フォルダを選択して取り込み...",
+                   command=self._enqueue_folder_ingest).pack(anchor=tk.W)
+        ttk.Label(folder_frame,
+                  text="フォルダ内の棋譜 (サブフォルダ含む) を現在のDBに増分登録します。"
+                       "再実行しても安全です。",
+                  foreground="gray").pack(anchor=tk.W, pady=(4, 0))
+
+        fg_frame = ttk.LabelFrame(win, text="floodgate 逐次更新", padding=8)
+        fg_frame.pack(fill=tk.X, padx=8, pady=4)
+        minutes = "/".join(f":{m:02d}" for m in AUTO_UPDATE_MINUTES)
+        ttk.Checkbutton(
+            fg_frame,
+            text=f"毎時 {minutes} に新規棋譜を自動取り込み (対局開始5分前)",
+            variable=self.auto_update_var,
+            command=self._on_auto_update_toggle).pack(anchor=tk.W)
+        row = ttk.Frame(fg_frame)
+        row.pack(anchor=tk.W, pady=(6, 0))
+        ttk.Button(row, text="今すぐ更新",
+                   command=lambda: self._enqueue_floodgate("手動")).pack(
+            side=tk.LEFT)
+        if not hasattr(self, "_rescan_days_var"):
+            self._rescan_days_var = tk.IntVar(value=7)
+        ttk.Label(row, text="  過去").pack(side=tk.LEFT)
+        ttk.Spinbox(row, from_=1, to=60, width=4,
+                    textvariable=self._rescan_days_var).pack(side=tk.LEFT)
+        ttk.Button(row, text="日分を再走査 (抜け確認)",
+                   command=lambda: self._enqueue_floodgate(
+                       "再走査", days=max(self._rescan_days_var.get(), 1))
+                   ).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(fg_frame,
+                  text="取り込み済み・不成立のファイルは削除されます。未終局は保持して"
+                       "次サイクルで再確認、解析エラーのファイルは data/floodgate/ に"
+                       "残ります。自動更新はこのウィンドウを閉じても動き続けます。",
+                  foreground="gray", wraplength=620, justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(6, 0))
+
+        log_frame = ttk.LabelFrame(win, text="ログ", padding=4)
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
+        text = tk.Text(log_frame, wrap=tk.NONE, state=tk.DISABLED,
+                       font=self.mono_font, height=10)
+        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL,
+                                   command=text.yview)
+        text.configure(yscrollcommand=log_scroll.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._update_log_text = text
+        if self._update_log_lines:
+            text.config(state=tk.NORMAL)
+            text.insert(tk.END, "\n".join(self._update_log_lines) + "\n")
+            text.see(tk.END)
+            text.config(state=tk.DISABLED)
 
     def _enabled_sources(self):
         """有効な出典キーの集合。全てONなら None (絞り込み無しの高速経路)。"""
@@ -829,6 +1070,7 @@ class PrecedentViewer:
             config = json.loads(CONFIG_PATH.read_text())
             self.db_var.set(config.get("db_path", ""))
             self.sfen_var.set(config.get("last_sfen", ""))
+            self.auto_update_var.set(bool(config.get("floodgate_auto_update")))
             if config.get("sync_file"):
                 self._sync_file = Path(config["sync_file"])
         except (OSError, json.JSONDecodeError):
@@ -839,7 +1081,9 @@ class PrecedentViewer:
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_PATH.write_text(json.dumps({
                 "db_path": self.db_var.get().strip(),
-                "last_sfen": self.sfen_var.get().strip()}, ensure_ascii=False))
+                "last_sfen": self.sfen_var.get().strip(),
+                "floodgate_auto_update": self.auto_update_var.get()},
+                ensure_ascii=False))
         except OSError:
             pass
 
