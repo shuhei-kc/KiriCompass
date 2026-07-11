@@ -201,6 +201,9 @@ class PrecedentViewer:
         self._db_jobs: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self._db_job_running: str | None = None
         self._floodgate_queued = False   # floodgateジョブの重複投入防止
+        # sfen混入ガードの結果キャッシュ: path -> (mtime_ns, has_sfen)。
+        # 該当なしのDBでは判定がgames全走査になるため、毎回は走らせない。
+        self._sfen_check_cache: dict[str, tuple[int, bool]] = {}
         self._update_win: tk.Toplevel | None = None
         self._update_log_lines: list[str] = []  # ウィンドウ再表示用の履歴
         self._name_db_query: str | None = None  # DB側に適用中の名前フィルタ
@@ -729,16 +732,42 @@ class PrecedentViewer:
         return True
 
     def _db_has_sfen_games(self, db_path: str) -> bool:
-        """.sfen連続対局 (source='sfen') が入っているか。"""
+        """.sfen連続対局 (source='sfen') が入っているか。
+
+        source に索引が無いため、該当なしのDBでは games 全走査になり
+        大規模DBでは数秒かかる。必ずワーカースレッドから呼ぶこと
+        (_sfen_guard 経由)。結果はDBファイルのmtimeが変わるまでキャッシュ
+        する (書き込みは取り込み後のWALチェックポイントでmtimeに現れる)。"""
         try:
+            mtime = Path(db_path).stat().st_mtime_ns
+            cached = self._sfen_check_cache.get(db_path)
+            if cached is not None and cached[0] == mtime:
+                return cached[1]
             conn = open_read_only(db_path)
             try:
-                return conn.execute("SELECT 1 FROM games WHERE source='sfen' "
-                                    "LIMIT 1").fetchone() is not None
+                found = conn.execute("SELECT 1 FROM games WHERE source='sfen' "
+                                     "LIMIT 1").fetchone() is not None
             finally:
                 conn.close()
+            self._sfen_check_cache[db_path] = (mtime, found)
+            return found
         except Exception:  # noqa: BLE001
             return False
+
+    def _sfen_guard(self, db_path: str, role: str, quiet: bool = False) -> bool:
+        """取り込みジョブ用のsfen混入ガード (ワーカースレッドで呼ぶ)。
+
+        戻り値: 取り込んでよければ True。混入していれば通知して False —
+        quiet はログのみ、手動操作はダイアログも出す (メインスレッド経由)。"""
+        if not self._db_has_sfen_games(db_path):
+            return True
+        message = (f"{role}に.sfen連続対局が入っています。"
+                   "実対局の取り込み先には使えません。")
+        self._ulog(f"[ガード] {message} ({db_path})")
+        if not quiet:
+            self.root.after(0, lambda: messagebox.showerror(
+                "エラー", message, parent=self._dialog_parent()))
+        return False
 
     def _floodgate_target_db(self, quiet: bool = False) -> str | None:
         """floodgate更新の対象DB (固定設定)。無効なら通知して None。
@@ -763,15 +792,8 @@ class PrecedentViewer:
                 return None
             if not self._ensure_db(db_path, "公開前例DB"):
                 return None
-        if self._db_has_sfen_games(db_path):
-            message = ("対象DBに.sfen連続対局が入っています。floodgateの"
-                       "取り込み先は実対局の前例DBにしてください")
-            if quiet:
-                self._ulog(f"[floodgate] {message} のためスキップ")
-            else:
-                messagebox.showerror("エラー", message,
-                                     parent=self._dialog_parent())
-            return None
+        # sfen混入ガードはここでは行わない: 大規模DBではgames全走査になり
+        # UIが固まるため、各ジョブの先頭 (_sfen_guard, ワーカースレッド) で行う。
         return db_path
 
     def _enqueue_floodgate(self, label: str, days: int = 2,
@@ -785,6 +807,8 @@ class PrecedentViewer:
         self._floodgate_queued = True
 
         def job():
+            if not self._sfen_guard(db_path, "公開前例DB", quiet=quiet):
+                return
             self._ulog(f"[floodgate] 更新開始 ({label}, 過去{days}日分を照合)")
             update_once(db_path, FLOODGATE_MIRROR, days=days,
                         log_line=lambda m: self._ulog(f"[floodgate] {m}"))
@@ -798,16 +822,10 @@ class PrecedentViewer:
         振り分けはファイル名 (stem) の出典判定: wdoor/WCSC/電竜戦と判定できる
         ものは公開前例DBへ、それ以外はプライベートDBへ。公開DBを配布しても
         私的な棋譜が混ざらないようにするための既定動作。"""
-        public_db = self._floodgate_target_db()  # 検証込み (sfen混入も拒否)
+        public_db = self._floodgate_target_db()  # パス検証 (sfen混入はジョブ側)
         if public_db is None:
             return
         private_db = norm_db_path(self.private_db_var.get()) or str(DEFAULT_PRIVATE_DB)
-        if self._db_has_sfen_games(private_db):
-            messagebox.showerror(
-                "エラー", "プライベートDBに.sfen連続対局が入っています。"
-                          "別のパスを指定してください。",
-                parent=self._dialog_parent())
-            return
         folder = filedialog.askdirectory(
             title="取り込む棋譜フォルダを選択", parent=self._dialog_parent())
         if not folder:
@@ -817,6 +835,11 @@ class PrecedentViewer:
             return detect_source(p.stem) != "other"
 
         def job():
+            if not self._sfen_guard(public_db, "公開前例DB"):
+                return
+            if Path(private_db).is_file() and \
+                    not self._sfen_guard(private_db, "プライベートDB"):
+                return
             self._ulog(f"[取り込み] 開始: {folder}")
             files = [p for p in Path(folder).rglob("*")
                      if p.suffix.lower() in KIFU_SUFFIXES and p.is_file()]
@@ -899,6 +922,23 @@ class PrecedentViewer:
 
     def _on_startup_check_toggle(self) -> None:
         self._save_config()
+
+    def _rescan_floodgate(self) -> None:
+        """再走査ボタン: 大きい日数は確認を挟む (気軽な長期walk防止)。
+
+        取り込み済みの棋譜は台帳で判定され再ダウンロードされないが、
+        日数ぶんの日別インデックス照合と、抜けがあった場合のダウンロードが
+        発生する。wdoorへの気軽な大量アクセスを防ぐため15日以上は確認する。"""
+        days = max(self._rescan_days_var.get(), 1)
+        if days >= 15 and not messagebox.askyesno(
+                "確認",
+                f"過去{days}日分の日別アーカイブをwdoorと照合します。\n"
+                "取り込み済みの棋譜は再ダウンロードされませんが、日数が\n"
+                "大きいほど時間とサーバへのアクセスが増えます。\n\n"
+                f"{days}日分の再走査を実行しますか？",
+                parent=self._dialog_parent()):
+            return
+        self._enqueue_floodgate("再走査", days=days)
 
     def _set_update_status(self) -> None:
         parts = []
@@ -993,9 +1033,8 @@ class PrecedentViewer:
         ttk.Spinbox(row, from_=1, to=60, width=4,
                     textvariable=self._rescan_days_var).pack(side=tk.LEFT)
         ttk.Button(row, text="日分を再走査 (抜け確認)",
-                   command=lambda: self._enqueue_floodgate(
-                       "再走査", days=max(self._rescan_days_var.get(), 1))
-                   ).pack(side=tk.LEFT, padx=(4, 0))
+                   command=self._rescan_floodgate).pack(side=tk.LEFT,
+                                                        padx=(4, 0))
         ttk.Label(fg_frame,
                   text="取り込み済み・不成立のファイルは削除されます。未終局は保持して"
                        "次回再確認、解析エラーのファイルは data/floodgate/ に残ります。"
