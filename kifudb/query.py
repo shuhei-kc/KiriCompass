@@ -45,6 +45,8 @@ REASON_JA = {
     "error": "エラー", "abnormal": "異常終了",
     # .sfen連続対局の擬似対局: 課題局面までの共通手順 (sfen_ingest.py)
     "task": "課題局面",
+    # buoy対局の擬似対局: 指定局面までの事前手順 (ingest.py)
+    "designated": "指定局面",
 }
 
 
@@ -162,6 +164,8 @@ def game_url(source: str, event: str, started_at: str = "",
       (WCSC26+ on live4; WCSC17-24 on live2; WCSC16 and older have no
       per-game pages — archives live at www2.computer-shogi.org/kifu/)
     """
+    if "#指定局面" in event:
+        return None  # 指定手順の擬似対局 (ingest.py) に対局ページは無い
     if source in ("floodgate", "wdoor") and started_at:
         date_dir = started_at[:10].replace("-", "/")
         return f"https://wdoor.c.u-tokyo.ac.jp/shogi/x/{date_dir}/{event}.html"
