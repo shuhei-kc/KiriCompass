@@ -296,20 +296,16 @@ class PrecedentViewer:
         family = pick_mono_font(self.root)
         size = 13 if sys.platform == "darwin" else 11
         self.mono_font = tkfont.Font(family=family, size=size)
-        heading_font = tkfont.nametofont("TkDefaultFont").copy()
-        if sys.platform == "win32":
-            # 列見出しはWindowsネイティブ (エクスプローラー等) に合わせて
-            # 非太字・一回り小さく。太字はSegoe UI経由だと日本語が潰れ、
-            # 日本語フォントでも野暮ったく見える (テスター指摘)。
-            heading_font.configure(size=9)
-        else:
-            heading_font.configure(weight="bold")
         style = ttk.Style(self.root)
         # 行高はフォントの実測 (ピクセル、スケール済み) から取るので、
         # 余白ぶんだけを _px で換算する。ここが食い違うと文字が縦に潰れる。
         row_height = self.mono_font.metrics("linespace") + self._px(8)
+        # 表本体は等幅 (数字の桁揃えのため)。見出し行は「先手・後手・
+        # 終局理由」等の言葉なので等幅にする意味がなく、既定のUIフォント
+        # そのまま (太字・サイズ調整もしない — 作者判断)。
         style.configure("Treeview", font=self.mono_font, rowheight=row_height)
-        style.configure("Treeview.Heading", font=heading_font)
+        style.configure("Treeview.Heading",
+                        font=tkfont.nametofont("TkDefaultFont"))
 
     # -- layout --------------------------------------------------------
 
