@@ -33,7 +33,8 @@ PROMOTE = {FU: TO, KY: NY, KE: NK, GI: NG, KA: UM, HI: RY}
 REASON_TO_SPECIAL = {
     "toryo": "%TORYO", "time_up": "%TIME_UP", "sennichite": "%SENNICHITE",
     "oute_sennichite": "%OUTE_SENNICHITE", "jishogi": "%JISHOGI",
-    "kachi": "%KACHI", "hikiwake": "%HIKIWAKE", "max_moves": "%MAX_MOVES",
+    "kachi": "%KACHI", "illegal_kachi": "%KACHI",  # 宣言失敗も指し手上は%KACHI
+    "hikiwake": "%HIKIWAKE", "max_moves": "%MAX_MOVES",
     "chudan": "%CHUDAN", "matta": "%MATTA", "illegal_move": "%ILLEGAL_MOVE",
     "uchifuzume": "%UCHIFUZUME", "oute_kaihimore": "%OUTE_KAIHIMORE",
     "tsumi": "%TSUMI", "fuzumi": "%FUZUMI", "error": "%ERROR",

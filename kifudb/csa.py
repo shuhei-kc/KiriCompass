@@ -18,7 +18,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .board import BLACK, WHITE, CSA_PIECE, FULL_SET, Position, unpromote
+from .board import (BLACK, WHITE, CSA_PIECE, FULL_SET, Position,
+                    declaration_is_legal, unpromote)
 
 # Normalized end reason tokens (stored in DB, mapped to Japanese in the UI).
 SPECIAL_TO_REASON = {
@@ -345,8 +346,16 @@ def parse_csa(text: str, source_name: str = "") -> GameRecord:
     elif hash_result_side == "lose":
         hash_result = RESULT_WHITE if your_turn_side == BLACK else RESULT_BLACK
 
+    # summaryの無い棋譜では %KACHI の成否 (宣言法) を自前で検証する。
+    # 宣言失敗 (illegal kachi) は宣言側の負けで、パリティ推定と勝敗が
+    # 逆転するため、局面から判定しないと勝者を取り違える。
+    kachi_legal: bool | None = None
+    if special == "KACHI" and summary_result is None:
+        kachi_legal = declaration_is_legal(pos)
+
     _finalize_result(rec, special, special_sign, summary_reason, summary_result,
-                     len(csa_moves), first_turn, hash_reason, hash_result)
+                     len(csa_moves), first_turn, hash_reason, hash_result,
+                     kachi_legal)
     if not rec.start_time and source_name:
         m = re.search(r"(\d{14})", Path(source_name).stem[::-1])
         if m:
@@ -467,7 +476,7 @@ def _apply_setup(pos, use_pi, removed, explicit_board, hand_lines,
 
 def _finalize_result(rec, special, sign, summary_reason, summary_result,
                      n_moves, first_turn, hash_reason=None,
-                     hash_result=None) -> None:
+                     hash_result=None, kachi_legal=None) -> None:
     side_to_move = (first_turn + n_moves) % 2
 
     reason = ""
@@ -477,6 +486,13 @@ def _finalize_result(rec, special, sign, summary_reason, summary_result,
         reason = summary_reason
     elif hash_reason:
         reason = hash_reason
+    if reason == "kachi":
+        # 宣言失敗 (要件を満たさない%KACHI) は宣言側の負け。summaryの判定を
+        # 最優先し、summaryが無い棋譜では宣言法の自前検証 (kachi_legal) で補う。
+        if summary_reason and "illegal" in summary_reason:
+            reason = "illegal_kachi"
+        elif summary_result is None and kachi_legal is False:
+            reason = "illegal_kachi"
     rec.end_reason = reason
     rec.finished = bool(reason)
     if not rec.finished:
@@ -497,6 +513,9 @@ def _finalize_result(rec, special, sign, summary_reason, summary_result,
         rec.result = None
     elif reason == "kachi":
         rec.result = RESULT_BLACK if side_to_move == BLACK else RESULT_WHITE
+    elif reason == "illegal_kachi":
+        # 宣言した側 (手番側) の負け
+        rec.result = RESULT_WHITE if side_to_move == BLACK else RESULT_BLACK
     elif reason in ("illegal_action",) and sign:
         rec.result = RESULT_WHITE if sign == "+" else RESULT_BLACK
     elif reason in ("toryo", "time_up", "tsumi", "illegal_move",

@@ -303,6 +303,54 @@ class Position:
         return moves
 
 
+# 入玉宣言の点数計算で5点扱いになる駒 (飛・角と、その成り駒)
+_DECLARATION_BIG = frozenset((KA, HI, UM, RY))
+
+
+def in_check(pos: Position) -> bool:
+    """手番側の玉に王手がかかっているか。
+
+    相手側の擬似合法手に玉のマスへ進む手があるかで判定する (擬似合法で
+    十分: 王手の有無に「自玉が素抜かれる」等の合法性は関係しない)。"""
+    king_sq = next((sq for sq in range(81)
+                    if pos.board[sq] == (pos.turn, OU)), None)
+    if king_sq is None:
+        return False
+    opp = pos.copy()
+    opp.turn = pos.turn ^ 1
+    return any((code & 0x7F) == king_sq for code in opp.pseudo_legal_moves())
+
+
+def declaration_is_legal(pos: Position) -> bool:
+    """手番側の入玉宣言 (%KACHI) が宣言法 (CSA 27点法) を満たすか。
+
+    要件: (1) 宣言側の玉が敵陣三段目以内 (2) 王手がかかっていない
+    (3) 玉を除く敵陣内の自駒が10枚以上 (4) 点数 = 敵陣内の自駒 + 持ち駒
+    (飛角とその成り駒5点・他1点・玉0点) が先手28点・後手27点以上。
+    summary行を持たない棋譜で %KACHI の成否を判定するために使う —
+    floodgateでは要件を満たさない宣言は宣言側の負け (illegal kachi)。"""
+    color = pos.turn
+    zone = (0, 1, 2) if color == BLACK else (6, 7, 8)
+    king_sq = next((sq for sq in range(81)
+                    if pos.board[sq] == (color, OU)), None)
+    if king_sq is None or (king_sq % 9) not in zone:
+        return False
+    zone_count = 0
+    points = 0
+    for sq in range(81):
+        piece = pos.board[sq]
+        if piece is None or piece[0] != color or piece[1] == OU:
+            continue
+        if (sq % 9) in zone:
+            zone_count += 1
+            points += 5 if piece[1] in _DECLARATION_BIG else 1
+    for ptype, n in pos.hands[color].items():
+        points += (5 if ptype in (KA, HI) else 1) * n
+    if zone_count < 10 or points < (28 if color == BLACK else 27):
+        return False
+    return not in_check(pos)
+
+
 def position_key_from_sfen(sfen_main: str) -> int:
     """64-bit position key from a canonical sfen main part (signed for SQLite)."""
     digest = hashlib.blake2b(sfen_main.encode(), digest_size=8).digest()
