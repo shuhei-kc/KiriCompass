@@ -6,6 +6,19 @@
 リアルタイムに閲覧できる。依存は Python 3.10+ の標準ライブラリのみ。
 設計の詳細は [DESIGN.md](DESIGN.md)。
 
+## 配布DB
+
+構築済みのDBを以下で配布している:
+
+https://drive.google.com/drive/u/0/folders/1ZyKwR-fZS2WIG26tmdK1BZLDPB94HcUm
+
+- **サンプルDB** `csa_sample.db` — floodgate 2026年分 + WCSC36 +
+  電竜戦第6回本戦 (約6.9万局、469MB)
+- **フルDB** — 準備中
+
+ダウンロードした .db は `KC2/data/` に置けばそのまま使える
+(ビューアの「参照...」で別の場所を選んでもよい)。
+
 ## 使い方
 
 DBの作成・更新 (増分。同じフォルダに再実行しても安全):
