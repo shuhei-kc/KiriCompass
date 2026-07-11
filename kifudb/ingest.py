@@ -419,10 +419,15 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
     # 手数の一次情報は棋譜内コメント (rec.buoy_moves)、無ければbuoy名のN。
     name_ply, buoy_label = _buoy_designated(event)
     buoy_ply = getattr(rec, "buoy_moves", 0) or name_ply
-    if start_ply < buoy_ply < n_moves:
-        _ensure_designated_game(conn, event, buoy_label, buoy_ply, rec,
-                                source, touched_keys)
-        start_ply = buoy_ply
+    if buoy_ply > start_ply:
+        if buoy_ply <= n_moves:
+            # 指定手順を完全に含む場合のみ擬似対局を作る (途中で切れた棋譜
+            # から作ると不完全な手順が別ハッシュで登録されてしまう)
+            _ensure_designated_game(conn, event, buoy_label, buoy_ply, rec,
+                                    source, touched_keys)
+        # 指定局面ちょうどで終局した対局 (buoy_ply == n_moves) は終局行のみ、
+        # 指定手順の途中で切れた対局は最終局面の行のみが索引される
+        start_ply = min(buoy_ply, n_moves)
     rows = []
     sort_key = date_sort_key(rec.start_time)
     for ply in range(start_ply, len(keys)):
