@@ -54,16 +54,23 @@ _HANDICAP_REMOVALS = {
 _TERMINAL_REASONS = {
     "投了": "toryo", "中断": "chudan", "千日手": "sennichite",
     "持将棋": "jishogi", "切れ負け": "time_up", "反則勝ち": "illegal_win",
-    "反則負け": "illegal_move", "入玉勝ち": "kachi", "詰み": "tsumi",
+    "反則負け": "illegal_move", "詰み": "tsumi",
+    # 入玉宣言はツールにより表記が揺れる (柿木系=入玉勝ち、将棋所系=
+    # 入玉宣言勝ち・宣言勝ち等)。未知の語は指し手として解釈されて
+    # パースエラーになるため、既知の揺れをすべて列挙する。
+    "入玉勝ち": "kachi", "入玉宣言勝ち": "kachi", "宣言勝ち": "kachi",
+    "入玉宣言": "kachi",
     "不詰": "fuzumi", "引き分け": "hikiwake", "待った": "matta",
     "トライ勝ち": "try", "封じ手": None, "延期": None,  # None = not terminal
+    "不戦勝": None, "不戦敗": None,  # 対局不成立: 指し手なし=未終局扱いで除外
 }
 
 _MOVE_LINE_RE = re.compile(
     r"^\s*(\d+)\s+(.+?)(?:\s+\(\s*[0-9:／/ ]+\))?\s*$")
 _FROM_RE = re.compile(r"\((\d)(\d)\)\s*$")
 _FOOTER_RE = re.compile(
-    r"^まで\d+手で(?:(先手|後手|下手|上手)の(反則勝ち|入玉勝ち|勝ち)"
+    r"^まで\d+手で(?:(先手|後手|下手|上手)の"
+    r"(反則勝ち|入玉宣言勝ち|入玉勝ち|宣言勝ち|勝ち)"
     r"|(千日手|持将棋|中断|引き分け))")
 
 # Engine-analysis comment styles found in KIF files (see ShogiHome
@@ -301,7 +308,13 @@ def _apply_kif_move(pos: Position, body: str, last_to: int | None,
     else:
         if len(text) < 2:
             raise CsaParseError(f"unparsable move: {body}")
-        to_sq = (_to_int(text[0]) - 1) * 9 + (_to_int(text[1]) - 1)
+        try:
+            # 未知の終局語 (表記揺れ等) が指し手として流れてきた場合も、
+            # ValueError でなく解析エラーとして報告する (取り込み側は
+            # 解析エラーを1ファイル単位で隔離する)。
+            to_sq = (_to_int(text[0]) - 1) * 9 + (_to_int(text[1]) - 1)
+        except (ValueError, KeyError) as exc:
+            raise CsaParseError(f"unparsable move: {body}") from exc
         text = text[2:].strip()
 
     promote = False
@@ -426,7 +439,9 @@ def _finalize_kif_result(rec: GameRecord, terminal_word: str | None,
             return
         winner = RESULT_BLACK if side in ("先手", "下手") else RESULT_WHITE
         if not reason:
-            reason = {"反則勝ち": "illegal_move", "入玉勝ち": "kachi"}.get(kind, "toryo")
+            reason = {"反則勝ち": "illegal_move", "入玉勝ち": "kachi",
+                      "入玉宣言勝ち": "kachi",
+                      "宣言勝ち": "kachi"}.get(kind, "toryo")
 
     if not reason and winner is None:
         rec.finished = False

@@ -350,6 +350,12 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
         stats.errors += 1
         log.warning("error: %s (%s)", path.name, exc)
         return "error", str(exc), None
+    except Exception as exc:  # noqa: BLE001 - 1ファイルの不良で全体を止めない
+        # 想定外の形式によるパーサーの未捕捉例外も、そのファイルだけを
+        # error として台帳に記録し、フォルダ取り込みは続行する。
+        stats.errors += 1
+        log.warning("error: %s (%s: %s)", path.name, type(exc).__name__, exc)
+        return "error", f"{type(exc).__name__}: {exc}", None
 
     if not rec.finished:
         if not rec.moves:
