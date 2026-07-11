@@ -275,24 +275,31 @@ class PrecedentViewer:
 
     def _setup_fonts(self) -> None:
         import tkinter.font as tkfont
+        ui_family = None
+        if sys.platform == "win32":
+            # 既定の TkDefaultFont (Segoe UI 9pt) は日本語グリフを持たず、
+            # フォントリンクの細い代替描画になって見劣りする。UI全体を
+            # 実在の日本語UIフォント10ptに統一する (太字も真のウェイトが
+            # 使えるようになり、見出しの潰れも起きない)。
+            available = set(tkfont.families(self.root))
+            ui_family = next((n for n in WIN_HEADING_FONT_CANDIDATES
+                              if n in available), None)
+            if ui_family:
+                for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont",
+                             "TkHeadingFont", "TkCaptionFont",
+                             "TkTooltipFont", "TkIconFont"):
+                    try:
+                        tkfont.nametofont(name).configure(
+                            family=ui_family, size=10)
+                    except tk.TclError:
+                        pass
         family = pick_mono_font(self.root)
         size = 13 if sys.platform == "darwin" else 11
         self.mono_font = tkfont.Font(family=family, size=size)
         heading_font = tkfont.nametofont("TkDefaultFont").copy()
-        bold = True
-        if sys.platform == "win32":
-            # 太字見出しの日本語が潰れないよう、真の太字を持つ実在の
-            # 日本語フォントに差し替える (WIN_HEADING_FONT_CANDIDATES)。
-            # 見つからない環境では太字を諦める — 合成太字で潰れるより
-            # 通常ウェイトの方がまし。
-            available = set(tkfont.families(self.root))
-            for name in WIN_HEADING_FONT_CANDIDATES:
-                if name in available:
-                    heading_font.configure(family=name)
-                    break
-            else:
-                bold = False
-        if bold:
+        # 実在の日本語フォントが見つからないWindowsでは太字を諦める
+        # (Segoe UI経由の合成太字は日本語が潰れる)。他OSは常に太字。
+        if sys.platform != "win32" or ui_family:
             heading_font.configure(weight="bold")
         style = ttk.Style(self.root)
         # 行高はフォントの実測 (ピクセル、スケール済み) から取るので、
