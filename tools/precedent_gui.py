@@ -319,9 +319,7 @@ class PrecedentViewer:
 
         ttk.Label(top, text="DB:").grid(row=0, column=0, sticky=tk.W)
         self.db_var = tk.StringVar()
-        # SFEN欄と同じ等幅フォントで統一する (隣接する入力欄のフォントが
-        # 揃っていないと雑に見える、というテスター指摘)
-        ttk.Entry(top, textvariable=self.db_var, font=self.mono_font).grid(
+        ttk.Entry(top, textvariable=self.db_var).grid(
             row=0, column=1, sticky=tk.EW, padx=4)
         ttk.Button(top, text="参照...", command=self._browse_db).grid(row=0, column=2)
         self.startup_check_var = tk.BooleanVar(value=True)
@@ -333,8 +331,8 @@ class PrecedentViewer:
 
         ttk.Label(top, text="SFEN:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
         self.sfen_var = tk.StringVar()
-        sfen_entry = ttk.Entry(top, textvariable=self.sfen_var,
-                               font=self.mono_font)
+        # DB欄と同じ既定フォントに揃える (SFEN欄だけ等幅だと浮いて見える)
+        sfen_entry = ttk.Entry(top, textvariable=self.sfen_var)
         sfen_entry.grid(row=1, column=1, sticky=tk.EW, padx=4, pady=(6, 0))
         sfen_entry.bind("<Return>", lambda _e: self.search())
         self.search_button = ttk.Button(top, text="検索", command=self.search)
