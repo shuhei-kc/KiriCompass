@@ -11,6 +11,7 @@ Design goals:
 from __future__ import annotations
 
 import sqlite3
+import sys
 import time as _time
 from pathlib import Path
 
@@ -107,7 +108,8 @@ CREATE TABLE IF NOT EXISTS source_files (
 """
 
 
-def open_for_write(db_path: str | Path) -> sqlite3.Connection:
+def open_for_write(db_path: str | Path,
+                   cache_mb: int = 256) -> sqlite3.Connection:
     db_path = resolve_db_path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)  # data/ は初回に無い
     conn = sqlite3.connect(str(db_path), timeout=30.0)
@@ -117,7 +119,9 @@ def open_for_write(db_path: str | Path) -> sqlite3.Connection:
     # A large page cache keeps the position index B-tree in memory during
     # bulk ingestion; without it, random inserts degrade badly once the
     # index outgrows the default 2MB cache (especially on external drives).
-    conn.execute("PRAGMA cache_size=-262144")   # 256MB
+    # The default stays deliberately conservative (256MB, never crashes a
+    # small machine); build_db.py --cache-mb raises it for big rebuilds.
+    conn.execute(f"PRAGMA cache_size=-{max(int(cache_mb), 16) * 1024}")
     conn.execute("PRAGMA temp_store=MEMORY")
     _migrate_if_needed(conn)
     conn.executescript(SCHEMA)
@@ -189,5 +193,12 @@ def open_read_only(db_path: str | Path) -> sqlite3.Connection:
                            uri=True, timeout=10.0, check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA cache_size=-65536")    # 64MB
-    conn.execute("PRAGMA mmap_size=1073741824")  # mmap up to 1GB
+    # mmap_size は「確保」ではなく上限: 実体はOSのファイルキャッシュで、
+    # メモリ逼迫時は自動的に手放されるためOOMの原因にならない。大きめに
+    # 要求し、実際の上限は各ビルドの SQLITE_MAX_MMAP_SIZE (多くは1〜2GB)
+    # に自動で切り詰められる — 環境が許す分だけ使う、が正確な動作。
+    if sys.maxsize > 2**32:
+        conn.execute("PRAGMA mmap_size=17179869184")   # 要求16GB (ビルド上限で clamp)
+    else:
+        conn.execute("PRAGMA mmap_size=1073741824")    # 32bit: 1GB
     return conn

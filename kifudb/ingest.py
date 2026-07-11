@@ -260,7 +260,8 @@ class IngestStats:
 def ingest_folder(db_path: str | Path, folder: str | Path,
                   batch_size: int = 500,
                   pv_max_moves: int = 255,
-                  progress=None, file_filter=None) -> IngestStats:
+                  progress=None, file_filter=None,
+                  cache_mb: int = 256) -> IngestStats:
     """Scan `folder` recursively and add finished games not yet in the DB.
 
     Safe to re-run: unchanged files are skipped via the source_files ledger,
@@ -271,7 +272,7 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
     folder = Path(folder)
     # 取り込み先を必ずログに残す (素の名前は data/ に解決される)
     log.info("database: %s", resolve_db_path(db_path))
-    conn = open_for_write(db_path)
+    conn = open_for_write(db_path, cache_mb=cache_mb)
     stats = IngestStats()
 
     # 旧バージョンが 'wdoor' と分類したレコードを floodgate に正規化する。

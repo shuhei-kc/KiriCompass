@@ -24,6 +24,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--pv-max-moves", type=int, default=255,
                         help="store at most N moves per PV (0 = no PVs)")
+    parser.add_argument("--cache-mb", type=int, default=256, metavar="MB",
+                        help="SQLiteページキャッシュ (既定256MB)。大きなDBへの"
+                             "追記が遅いとき、空きメモリに応じて増やすと速くなる")
     args = parser.parse_args()
 
     handlers = [logging.StreamHandler()]
@@ -34,7 +37,8 @@ def main() -> None:
 
     stats = ingest_folder(args.db_path, args.kifu_folder,
                           batch_size=args.batch_size,
-                          pv_max_moves=args.pv_max_moves)
+                          pv_max_moves=args.pv_max_moves,
+                          cache_mb=args.cache_mb)
     print(stats.summary())
 
 
