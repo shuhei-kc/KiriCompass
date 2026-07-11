@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""CLI: floodgateの新規棋譜を1回取り込んで終了する (cron等のヘッドレス運用向け)。
+"""CLI: floodgateの新規棋譜を1回取り込んで終了する。
 
 Usage:
     python3 tools/update_floodgate.py <db_path> [--jitter SEC] [--days N]
 
-毎時 :20/:50 起点での実行を推奨 (対局は毎時 :00/:30 開始)。`--jitter 300`
-を付けると開始前に 0〜300秒のランダムな待ちが入り、利用者全員が同一秒に
-サーバへ集中するのを避けられる (cron / タスクスケジューラ共通)。
-DBが無ければ空で新規作成する。GUIの「DB更新」ウィンドウと同じ
+GUIの「DB更新」ウィンドウ (起動時チェック・今すぐ更新) と同じ
 kifudb.floodgate.update_once を呼ぶだけの薄いラッパー。
+DBが無ければ空で新規作成する。
 """
 
 from __future__ import annotations
@@ -35,8 +33,7 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=2,
                         help="今日から遡って照合する日数 (既定: 2)")
     parser.add_argument("--jitter", type=int, default=0, metavar="SEC",
-                        help="開始前に 0〜SEC 秒のランダムな待ちを入れる "
-                             "(スケジューラ運用でのサーバ集中回避。既定: 0)")
+                        help="開始前に 0〜SEC 秒のランダムな待ちを入れる (既定: 0)")
     parser.add_argument("--log", default=None, help="ログファイル")
     args = parser.parse_args()
 

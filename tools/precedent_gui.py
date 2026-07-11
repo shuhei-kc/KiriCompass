@@ -903,9 +903,7 @@ class PrecedentViewer:
         遡り日数はDB内の最新floodgate対局から逆算する (固定日数だと
         「久しぶりの起動で取りこぼす / 毎回無駄に遡る」の両方が起きる)。
         空きが STARTUP_CHECK_MAX_DAYS を超える場合は自動では取得せず、
-        手動の再走査を案内する — 大きい取得ほど明示的な操作で行う方針。
-        周期的な常時更新が必要な場合は tools/update_floodgate.py +
-        cron/タスクスケジューラを使う (README参照)。"""
+        手動の再走査を案内する — 大きい取得ほど明示的な操作で行う方針。"""
         if not self.startup_check_var.get():
             return
         db_path = self._floodgate_target_db(quiet=True)
@@ -1045,9 +1043,7 @@ class PrecedentViewer:
                                                         padx=(4, 0))
         ttk.Label(fg_frame,
                   text="取り込み済み・不成立のファイルは削除されます。未終局は保持して"
-                       "次回再確認、解析エラーのファイルは data/floodgate/ に残ります。"
-                       "常時の周期更新が必要な場合は tools/update_floodgate.py を"
-                       "cron/タスクスケジューラで回してください (README参照)。",
+                       "次回再確認、解析エラーのファイルは data/floodgate/ に残ります。",
                   foreground="gray", wraplength=620, justify=tk.LEFT).pack(
             anchor=tk.W, pady=(6, 0))
 
