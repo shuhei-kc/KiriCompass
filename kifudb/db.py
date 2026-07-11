@@ -23,7 +23,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 def resolve_db_path(db_path: str | Path) -> Path:
     """DBパスの解決規則 (全ツール共通の一元定義)。
 
-    ディレクトリ成分のない素の名前 ('csa.db') は KC2/data/ 内を指す —
+    ディレクトリ成分のない素の名前 ('csa.db') はリポジトリ直下の data/ を指す —
     実行時のカレントディレクトリに意味を持たせず、CLI・GUI・USIエンジンの
     どこから同じ名前を渡しても同じDBに解決されることを保証する (役割別DBの
     分離は「全員が同じファイルを見ている」ことが前提のため)。

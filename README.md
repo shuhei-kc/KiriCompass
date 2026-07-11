@@ -16,7 +16,7 @@ https://drive.google.com/drive/u/0/folders/1ZyKwR-fZS2WIG26tmdK1BZLDPB94HcUm
   電竜戦第6回本戦 (約6.9万局、469MB)
 - **フルDB** — 準備中
 
-ダウンロードした .db は `KC2/data/` に置けばそのまま使える
+ダウンロードした .db は `KiriCompass/data/` に置けばそのまま使える
 (ビューアの「参照...」で別の場所を選んでもよい)。
 
 ## 使い方
@@ -28,7 +28,8 @@ python3 tools/build_db.py csa.db /path/to/kifu_folder --log build.log
 ```
 
 **DB名の解決規則 (全ツール共通):** `csa.db` のようにディレクトリなしで
-指定したDB名は、どこから実行しても常に `KC2/data/` 内を指す。別の場所の
+指定したDB名は、どこから実行しても常に `KiriCompass/data/` (リポジトリ
+直下の data フォルダ) を指す。別の場所の
 DBを使う場合は絶対パスか、`./csa.db`・`path/to/csa.db` のように
 ディレクトリ付きで指定する。
 
@@ -76,8 +77,8 @@ python3 tools/update_floodgate.py csa.db --jitter 300 --log floodgate.log
 Windowsのタスクスケジューラなら、毎時 :20 と :50 の2本を登録する:
 
 ```bat
-schtasks /create /tn "KiriCompass floodgate 20" /sc hourly /st 00:20 /tr "cmd /c cd /d C:\path\to\KC2 && py -3 tools\update_floodgate.py csa.db --jitter 300 --log floodgate.log"
-schtasks /create /tn "KiriCompass floodgate 50" /sc hourly /st 00:50 /tr "cmd /c cd /d C:\path\to\KC2 && py -3 tools\update_floodgate.py csa.db --jitter 300 --log floodgate.log"
+schtasks /create /tn "KiriCompass floodgate 20" /sc hourly /st 00:20 /tr "cmd /c cd /d C:\path\to\KiriCompass && py -3 tools\update_floodgate.py csa.db --jitter 300 --log floodgate.log"
+schtasks /create /tn "KiriCompass floodgate 50" /sc hourly /st 00:50 /tr "cmd /c cd /d C:\path\to\KiriCompass && py -3 tools\update_floodgate.py csa.db --jitter 300 --log floodgate.log"
 ```
 
 KiriCompassビューアの「DB更新...」ウィンドウでも同じことができる: フォルダ取り込みと、

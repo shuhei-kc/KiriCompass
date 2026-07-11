@@ -5,7 +5,7 @@
     python3 tools/usi_engine.py --db /path/to/csa.db
 
 将棋盤GUIへの登録用ラッパースクリプト生成 (これを登録する。
-省略時は KC2/runtime/kiricompass_engine.command に作られる):
+省略時は KiriCompass/runtime/kiricompass_engine.command に作られる):
     python3 tools/usi_engine.py --db /path/to/csa.db --make-launcher
 
 検討モードで使うと、局面ごとに前例の候補手がmultipvで表示され
