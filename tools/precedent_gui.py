@@ -71,6 +71,27 @@ def setup_dpi_awareness() -> None:
                 pass
 
 
+def windows_dpi() -> int:
+    """WindowsのシステムDPIを返す (取得できなければ96)。
+
+    DPI対応を宣言したプロセスでは、Tkのスケーリングと固定ピクセル寸法を
+    このDPIに合わせて自前で調整しないと、表示スケール125%/150%の環境で
+    「フォントだけ拡大されて列幅・行高がそのまま → 文字が潰れる/切れる」
+    が起きる。Tk任せにせず明示的に取得して決定的にする。"""
+    import ctypes
+    try:
+        return int(ctypes.windll.user32.GetDpiForSystem())  # Win10 1607+
+    except (AttributeError, OSError):
+        pass
+    try:
+        hdc = ctypes.windll.user32.GetDC(0)
+        dpi = int(ctypes.windll.gdi32.GetDeviceCaps(hdc, 88))  # LOGPIXELSX
+        ctypes.windll.user32.ReleaseDC(0, hdc)
+        return dpi or 96
+    except (AttributeError, OSError):
+        return 96
+
+
 def pick_mono_font(root: tk.Tk) -> str:
     import tkinter.font as tkfont
     available = set(tkfont.families(root))
@@ -190,7 +211,17 @@ class PrecedentViewer:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         root.title("KiriCompass")
-        root.geometry("900x810")
+        # Windows: 表示スケールに合わせてTkのポイント→ピクセル換算と、
+        # このGUIの固定ピクセル寸法 (_px) を明示的に揃える。Tkの自動判定に
+        # 任せると、DPI宣言との組み合わせ次第でフォントと行高・列幅がずれて
+        # 文字が潰れる環境がある (Windows 125%/150%スケールで報告あり)。
+        if sys.platform == "win32":
+            dpi = windows_dpi()
+            root.tk.call("tk", "scaling", dpi / 72.0)
+            self._ui_scale = dpi / 96.0
+        else:
+            self._ui_scale = 1.0
+        root.geometry(f"{self._px(900)}x{self._px(810)}")
 
         self.precedents = []
         self.query_position: Position | None = None
@@ -227,6 +258,10 @@ class PrecedentViewer:
         # 起動時の新規棋譜チェック (ウィンドウ表示を待ってから)
         self.root.after(1200, self._startup_floodgate_check)
 
+    def _px(self, n: int) -> int:
+        """設計時 (96dpi) のピクセル値を現在の表示スケールに換算する。"""
+        return round(n * self._ui_scale)
+
     def _setup_fonts(self) -> None:
         import tkinter.font as tkfont
         family = pick_mono_font(self.root)
@@ -235,7 +270,9 @@ class PrecedentViewer:
         heading_font = tkfont.nametofont("TkDefaultFont").copy()
         heading_font.configure(weight="bold")
         style = ttk.Style(self.root)
-        row_height = self.mono_font.metrics("linespace") + 8
+        # 行高はフォントの実測 (ピクセル、スケール済み) から取るので、
+        # 余白ぶんだけを _px で換算する。ここが食い違うと文字が縦に潰れる。
+        row_height = self.mono_font.metrics("linespace") + self._px(8)
         style.configure("Treeview", font=self.mono_font, rowheight=row_height)
         style.configure("Treeview.Heading", font=heading_font)
 
@@ -299,7 +336,8 @@ class PrecedentViewer:
                 ("white", "後手勝", 70, tk.E), ("draw", "引分", 60, tk.E),
                 ("rate", "先手勝率", 80, tk.E), ("confl", "合流", 60, tk.E)):
             self.cand_tv.heading(col, text=label)
-            self.cand_tv.column(col, width=width, anchor=anchor, stretch=False)
+            self.cand_tv.column(col, width=self._px(width), anchor=anchor,
+                                stretch=False)
         # 列幅の合計にウィジェット自体を合わせ、左に詰める
         self.cand_tv.pack(side=tk.LEFT, fill=tk.Y)
         cand_scroll = ttk.Scrollbar(cand_frame, orient=tk.VERTICAL,
@@ -382,7 +420,7 @@ class PrecedentViewer:
                 ("result", "勝者", 44, tk.CENTER), ("reason", "終局理由", 68, tk.CENTER),
                 ("plies", "手数", 50, tk.E), ("source", "出典", 80, tk.W)):
             self.prec_tv.heading(col, text=label)
-            self.prec_tv.column(col, width=width, anchor=anchor,
+            self.prec_tv.column(col, width=self._px(width), anchor=anchor,
                                 stretch=col in ("black", "white"))
         scroll = ttk.Scrollbar(tree_holder, orient=tk.VERTICAL,
                                command=self.prec_tv.yview)
@@ -976,7 +1014,7 @@ class PrecedentViewer:
             return
         win = tk.Toplevel(self.root)
         win.title("DB更新")
-        win.geometry("700x820")
+        win.geometry(f"{self._px(700)}x{self._px(820)}")
         self._update_win = win
 
         db_frame = ttk.LabelFrame(win, text="取り込み先", padding=8)
@@ -1002,7 +1040,7 @@ class PrecedentViewer:
         db_row("公開前例DB:", self.fg_db_var, "公開前例DBを選択")
         db_row("プライベートDB:", self.private_db_var, "プライベートDBを選択")
         db_row(".sfen DB:", self.sfen_db_var, ".sfen 専用DBを選択")
-        ttk.Label(db_frame, foreground="gray", wraplength=630, justify=tk.LEFT,
+        ttk.Label(db_frame, foreground="gray", wraplength=self._px(630), justify=tk.LEFT,
                   text="公開前例DB = 誰でも入手できる棋譜 (floodgate/WCSC/電竜戦)。"
                        "配布・共有できる状態を保つため、個人入手の棋譜は"
                        "プライベートDBへ、.sfen連続対局は .sfen DBへ入り、"
@@ -1016,7 +1054,7 @@ class PrecedentViewer:
                   text="フォルダ内の棋譜 (サブフォルダ含む) を増分登録します。"
                        "ファイル名から wdoor/WCSC/電竜戦 と判定できるものは"
                        "公開前例DBへ、それ以外はプライベートDBへ。再実行しても安全です。",
-                  foreground="gray", wraplength=630, justify=tk.LEFT).pack(
+                  foreground="gray", wraplength=self._px(630), justify=tk.LEFT).pack(
             anchor=tk.W, pady=(4, 0))
 
         fg_frame = ttk.LabelFrame(win, text="floodgate 更新 (公開前例DBへ)",
@@ -1044,7 +1082,7 @@ class PrecedentViewer:
         ttk.Label(fg_frame,
                   text="取り込み済み・不成立のファイルは削除されます。未終局は保持して"
                        "次回再確認、解析エラーのファイルは data/floodgate/ に残ります。",
-                  foreground="gray", wraplength=620, justify=tk.LEFT).pack(
+                  foreground="gray", wraplength=self._px(620), justify=tk.LEFT).pack(
             anchor=tk.W, pady=(6, 0))
 
         # --- .sfen 連続対局 (専用DBへ。他の取り込み先とは混ざらない) ---
@@ -1061,7 +1099,7 @@ class PrecedentViewer:
         ttk.Button(sfen_buttons, text="選択バッチを削除",
                    command=self._delete_selected_batch).pack(
             side=tk.LEFT, padx=(6, 0))
-        ttk.Label(sfen_frame, foreground="gray", wraplength=620,
+        ttk.Label(sfen_frame, foreground="gray", wraplength=self._px(620),
                   justify=tk.LEFT,
                   text="1ファイル=1バッチ。課題局面までの共通手順は「(共通)」名の"
                        "擬似対局として1回だけ登録される (終局理由列は「課題局面」)。"
@@ -1079,7 +1117,7 @@ class PrecedentViewer:
                 ("prefix", "課題手数", 70, tk.E),
                 ("status", "状態", 70, tk.CENTER)):
             tree.heading(col, text=text_)
-            tree.column(col, width=width, anchor=anchor,
+            tree.column(col, width=self._px(width), anchor=anchor,
                         stretch=col in ("batch", "label"))
         sfen_scroll = ttk.Scrollbar(tree_holder, orient=tk.VERTICAL,
                                     command=tree.yview)
