@@ -27,6 +27,9 @@ DBの作成・更新 (増分。同じフォルダに再実行しても安全):
 python3 tools/build_db.py csa.db /path/to/kifu_folder --log build.log
 ```
 
+メモリに余裕があれば `--cache-mb 2048` のようにキャッシュを増やすと、
+大きなDBへの追記が速くなる (既定256MB)。
+
 **DB名の解決規則 (全ツール共通):** `csa.db` のようにディレクトリなしで
 指定したDB名は、どこから実行しても常に `KiriCompass/data/` (リポジトリ
 直下の data フォルダ) を指す。別の場所の
