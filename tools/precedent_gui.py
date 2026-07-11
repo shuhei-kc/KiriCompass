@@ -100,6 +100,17 @@ def pick_mono_font(root: tk.Tk) -> str:
             return name
     return "TkFixedFont"
 
+
+# Windowsの太字見出し用: 真の太字を持つ実在の日本語UIフォント。既定の
+# TkDefaultFont (Segoe UI) は日本語グリフを持たず、フォントリンクの代替
+# 描画に太字合成 (機械的な重ね描き) がかかって日本語の太字が潰れるため、
+# 実在のフォントを明示して差し替える。
+WIN_HEADING_FONT_CANDIDATES = [
+    "Yu Gothic UI", "游ゴシック",     # Windows 10+
+    "Meiryo UI", "メイリオ",          # Windows Vista+
+    "BIZ UDPゴシック", "BIZ UDPGothic",
+]
+
 CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
 # floodgate逐次更新の一時保存フォルダ (取り込み後に削除される。詳細は
 # kifudb/floodgate.py)。未終局・エラーのファイルだけが一時的に残る。
@@ -268,7 +279,21 @@ class PrecedentViewer:
         size = 13 if sys.platform == "darwin" else 11
         self.mono_font = tkfont.Font(family=family, size=size)
         heading_font = tkfont.nametofont("TkDefaultFont").copy()
-        heading_font.configure(weight="bold")
+        bold = True
+        if sys.platform == "win32":
+            # 太字見出しの日本語が潰れないよう、真の太字を持つ実在の
+            # 日本語フォントに差し替える (WIN_HEADING_FONT_CANDIDATES)。
+            # 見つからない環境では太字を諦める — 合成太字で潰れるより
+            # 通常ウェイトの方がまし。
+            available = set(tkfont.families(self.root))
+            for name in WIN_HEADING_FONT_CANDIDATES:
+                if name in available:
+                    heading_font.configure(family=name)
+                    break
+            else:
+                bold = False
+        if bold:
+            heading_font.configure(weight="bold")
         style = ttk.Style(self.root)
         # 行高はフォントの実測 (ピクセル、スケール済み) から取るので、
         # 余白ぶんだけを _px で換算する。ここが食い違うと文字が縦に潰れる。
