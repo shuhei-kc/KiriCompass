@@ -297,9 +297,12 @@ class PrecedentViewer:
         size = 13 if sys.platform == "darwin" else 11
         self.mono_font = tkfont.Font(family=family, size=size)
         heading_font = tkfont.nametofont("TkDefaultFont").copy()
-        # 実在の日本語フォントが見つからないWindowsでは太字を諦める
-        # (Segoe UI経由の合成太字は日本語が潰れる)。他OSは常に太字。
-        if sys.platform != "win32" or ui_family:
+        if sys.platform == "win32":
+            # 列見出しはWindowsネイティブ (エクスプローラー等) に合わせて
+            # 非太字・一回り小さく。太字はSegoe UI経由だと日本語が潰れ、
+            # 日本語フォントでも野暮ったく見える (テスター指摘)。
+            heading_font.configure(size=9)
+        else:
             heading_font.configure(weight="bold")
         style = ttk.Style(self.root)
         # 行高はフォントの実測 (ピクセル、スケール済み) から取るので、
@@ -316,7 +319,9 @@ class PrecedentViewer:
 
         ttk.Label(top, text="DB:").grid(row=0, column=0, sticky=tk.W)
         self.db_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.db_var).grid(
+        # SFEN欄と同じ等幅フォントで統一する (隣接する入力欄のフォントが
+        # 揃っていないと雑に見える、というテスター指摘)
+        ttk.Entry(top, textvariable=self.db_var, font=self.mono_font).grid(
             row=0, column=1, sticky=tk.EW, padx=4)
         ttk.Button(top, text="参照...", command=self._browse_db).grid(row=0, column=2)
         self.startup_check_var = tk.BooleanVar(value=True)
