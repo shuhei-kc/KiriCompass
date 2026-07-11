@@ -105,8 +105,12 @@ def _ssl_context() -> ssl.SSLContext:
 _SSL_CTX = _ssl_context()
 
 
-def _http_get(url: str, since_mtime: float | None = None) -> bytes | None:
-    """GET。since_mtime を渡すと If-Modified-Since 付き。304/404 は None。"""
+def http_get(url: str, since_mtime: float | None = None) -> bytes | None:
+    """GET。since_mtime を渡すと If-Modified-Since 付き。304/404 は None。
+
+    UAの明示とTLSフォールバック (_ssl_context) 込みの共通ヘルパー。
+    大会ダウンローダ (download_wcsc / download_denryusen) もこれを使う —
+    外部ライブラリ (requests) に依存しないための一元化。"""
     headers = {"User-Agent": USER_AGENT}
     if since_mtime is not None:
         headers["If-Modified-Since"] = email.utils.formatdate(
@@ -136,7 +140,7 @@ def _write_atomic(dest: Path, data: bytes) -> None:
 
 def list_day(day: date) -> list[str]:
     """日別インデックスから .csa ファイル名を列挙する (無い日は空リスト)。"""
-    data = _http_get(f"{BASE_URL}/{day:%Y/%m/%d}/")
+    data = http_get(f"{BASE_URL}/{day:%Y/%m/%d}/")
     if data is None:
         return []
     html = data.decode("utf-8", errors="replace")
@@ -213,7 +217,7 @@ def update_once(db_path: str | Path, mirror_dir: str | Path,
                                 (str(dest),)).fetchone():
                     continue  # 墓標 (0手不成立などで登録されず削除済み)
                 try:
-                    data = _http_get(f"{BASE_URL}/{day:%Y/%m/%d}/"
+                    data = http_get(f"{BASE_URL}/{day:%Y/%m/%d}/"
                                      f"{urllib.parse.quote(name)}")
                 except (urllib.error.URLError, OSError) as exc:
                     say(f"ダウンロード失敗 {name}: {exc}")
@@ -235,7 +239,7 @@ def update_once(db_path: str | Path, mirror_dir: str | Path,
             if m is None:
                 continue
             try:
-                data = _http_get(_day_url(m.group(1), p.name),
+                data = http_get(_day_url(m.group(1), p.name),
                                  since_mtime=p.stat().st_mtime)
             except (urllib.error.URLError, OSError) as exc:
                 say(f"再取得失敗 {p.name}: {exc}")

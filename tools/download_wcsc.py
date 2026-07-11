@@ -20,14 +20,27 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 import time
+import urllib.error
 from pathlib import Path
 from urllib.parse import unquote, urljoin
 
-import requests
-from bs4 import BeautifulSoup
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from kifudb.floodgate import http_get  # noqa: E402 - UA/TLS込みの標準ライブラリGET
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "wcsc"
+
+_H1_RE = re.compile(r"<h1[^>]*>(.*?)</h1>", re.S | re.I)
+
+
+def _get_text(url: str) -> str | None:
+    """GETしてテキストを返す。404/接続失敗は None。"""
+    try:
+        data = http_get(url)
+    except (urllib.error.URLError, OSError):
+        return None
+    return None if data is None else data.decode("utf-8", errors="replace")
 
 
 def edition_paths(edition: str) -> tuple[str, str, str]:
@@ -40,38 +53,32 @@ def edition_paths(edition: str) -> tuple[str, str, str]:
 
 def list_txt_urls(slug: str) -> list[str]:
     base = f"http://live4.computer-shogi.org/{slug}/"
-    try:
-        r = requests.get(urljoin(base, "list.txt"), timeout=15)
-    except requests.RequestException:
+    text = _get_text(urljoin(base, "list.txt"))
+    if text is None:
         return []
-    if r.status_code != 200:
-        return []
-    return [urljoin(base, s.strip()) for s in r.text.splitlines()
+    return [urljoin(base, s.strip()) for s in text.splitlines()
             if s.strip().lower().endswith(".csa")]
 
 
 def s3_urls(bucket: str) -> list[str]:
     base = f"https://{bucket}.s3.amazonaws.com/"
     for prefix in ("live", "test"):
-        try:
-            r = requests.get(f"{base}{prefix}1.html", timeout=15)
-        except requests.RequestException:
+        text = _get_text(f"{base}{prefix}1.html")
+        if text is None:
             continue
-        if r.status_code != 200:
-            continue
-        soup = BeautifulSoup(r.text, "html.parser")
-        h1 = soup.find("h1")
+        # ページ総数は h1 の「n / total」表記から (タグ1個なので正規表現で足りる)
         total = 0
+        h1 = _H1_RE.search(text)
         if h1:
-            m = re.search(r"\s*\d+\s*/\s*(\d+)", h1.text)
+            m = re.search(r"\s*\d+\s*/\s*(\d+)", h1.group(1))
             if m:
                 total = int(m.group(1))
         urls: list[str] = []
         for i in range(1, max(total, 1) + 1):
-            rp = requests.get(f"{base}{prefix}{i}.html", timeout=15)
-            if rp.status_code != 200:
+            page = text if i == 1 else _get_text(f"{base}{prefix}{i}.html")
+            if page is None:
                 continue
-            mf = re.search(r'const KIF_FILES = "([^"]+)"', rp.text)
+            mf = re.search(r'const KIF_FILES = "([^"]+)"', page)
             if mf:
                 urls += [urljoin(base, fn.strip().lstrip("./"))
                          for fn in mf.group(1).split(",") if fn.strip()]
@@ -103,11 +110,12 @@ def download_edition(edition: str, dry_run: bool = False) -> int:
     ok = 0
     for name, u in by_name.items():
         try:
-            r = requests.get(u, timeout=30)
-            r.raise_for_status()
-            (out / name).write_bytes(r.content)
+            data = http_get(u)
+            if data is None:
+                raise urllib.error.URLError("404 not found")
+            (out / name).write_bytes(data)
             ok += 1
-        except requests.RequestException as e:
+        except (urllib.error.URLError, OSError) as e:
             print(f"    FAIL {name}: {e}")
         time.sleep(0.03)
     print(f"[{edition}] downloaded {ok}/{len(by_name)}")

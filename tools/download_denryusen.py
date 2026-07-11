@@ -23,10 +23,12 @@ import collections
 import re
 import sys
 import time
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import requests
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from kifudb.floodgate import http_get  # noqa: E402 - UA/TLS込みの標準ライブラリGET
 
 BASE = "https://denryu-sen.jp/denryusen"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "denryusen"
@@ -51,12 +53,15 @@ _STEM_RE = re.compile(r'kifujs/([^"]+?)\.html')
 
 
 def list_events(tid: str) -> list[str]:
-    r = requests.get(f"{BASE}/{tid}/kifulist.txt", timeout=20)
-    if r.status_code != 200:
+    try:
+        data = http_get(f"{BASE}/{tid}/kifulist.txt")
+    except (urllib.error.URLError, OSError):
+        return []
+    if data is None:
         return []
     # 同一対局が複数行に出ることがあるので一意化 (順序保持)
     seen, out = set(), []
-    for stem in _STEM_RE.findall(r.text):
+    for stem in _STEM_RE.findall(data.decode("utf-8", errors="replace")):
         if stem not in seen:
             seen.add(stem)
             out.append(stem)
@@ -85,13 +90,14 @@ def download_one(tid: str, event: str, retries: int = 3) -> bool:
     url = f"{BASE}/{tid}/kifufiles/{event}.csa"
     for attempt in range(retries):
         try:
-            r = requests.get(url, timeout=30)
-            r.raise_for_status()
-        except requests.RequestException:
+            data = http_get(url)
+        except (urllib.error.URLError, OSError):
             time.sleep(0.5 * (attempt + 1))  # 一時的な瞬断に備えて指数的に待つ
             continue
+        if data is None:
+            return False  # 404: リトライしても現れない
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(r.content)
+        out.write_bytes(data)
         return True
     return False
 
