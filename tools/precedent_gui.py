@@ -102,6 +102,9 @@ STARTUP_CHECK_MAX_DAYS = 7
 # 島表 (出典→game_id区間) の永続キャッシュ。DBが変わらない限り起動時の
 # 再計算 (gamesテーブル全走査) を丸ごと省ける。
 INTERVALS_CACHE_PATH = RUNTIME_DIR / "source_intervals.json"
+# キャッシュ形式版。島の分類規則が変わったら上げる (旧キャッシュを無効化して
+# 再計算させる)。v2 = 電竜戦TSECの細分を導入。
+INTERVALS_CACHE_VERSION = 2
 
 
 def norm_db_path(raw: str) -> str:
@@ -123,6 +126,8 @@ def load_interval_sidecar(db_path: str):
     try:
         data = json.loads(INTERVALS_CACHE_PATH.read_text(encoding="utf-8"))
         entry = data[str(resolve_db_path(db_path).resolve())]
+        if entry.get("v") != INTERVALS_CACHE_VERSION:
+            return None  # 分類規則が古い形式のキャッシュは使わない
         conn = open_read_only(db_path)
         try:
             max_gid, count = conn.execute(
@@ -144,6 +149,7 @@ def save_interval_sidecar(db_path: str, intervals, max_gid: int,
         except (OSError, ValueError):
             data = {}
         data[str(resolve_db_path(db_path).resolve())] = {
+            "v": INTERVALS_CACHE_VERSION,
             "max_gid": max_gid, "count": count,
             "intervals": [list(iv) for iv in intervals]}
         INTERVALS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -350,7 +356,9 @@ class PrecedentViewer:
         ttk.Label(filter_row, text="出典:").pack(side=tk.LEFT)
         self.source_filter_vars: dict[str, tk.BooleanVar] = {}
         for key, label in (("floodgate", "floodgate"), ("wcsc", "WCSC"),
-                           ("denryusen", "電竜戦"), ("other", "その他")):
+                           ("denryusen", "電竜戦 (TSEC以外)"),
+                           ("denryusen_tsec", "電竜戦 (TSEC)"),
+                           ("other", "その他")):
             var = tk.BooleanVar(value=True)
             self.source_filter_vars[key] = var
             ttk.Checkbutton(filter_row, text=label, variable=var,

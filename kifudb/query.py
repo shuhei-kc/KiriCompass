@@ -15,8 +15,25 @@ from .db import open_read_only, resolve_db_path
 # 前例一覧の1ページあたりの件数 (GUI・CLI・APIのデフォルトを一元管理)
 DEFAULT_PAGE_SIZE = 1000
 
-# DBに現れる既知の出典。これ以外は絞り込みで「その他」に分類される。
-KNOWN_SOURCES = ("floodgate", "wcsc", "denryusen")
+# 絞り込みで使う既知の出典キー。これ以外は「その他」に分類される。
+# 電竜戦はTSEC (指定局面戦中心の企画。序盤統計の意味が本戦と異なる) を
+# 別キーに分ける。DBの source 列は 'denryusen' のままで、島表の計算時に
+# event 接頭辞 (drNtsec) で細分する仮想キー — DB分割や再構築は不要。
+KNOWN_SOURCES = ("floodgate", "wcsc", "denryusen", "denryusen_tsec")
+
+def is_tsec_event(event: str) -> bool:
+    """電竜戦eventがTSEC (指定局面戦企画) のものか。
+
+    判定は event接頭辞 drNtsec (dr1tsec1 のような変則も先頭一致で拾う)。
+    SQL側 (_TSEC_SQL) と同じ判定であること。"""
+    return bool(_TSEC_EVENT_RE.match(event))
+
+
+def classified_source(source: str, event: str) -> str:
+    """絞り込み用の出典キー (source列 + TSEC細分) を返す。"""
+    if source == "denryusen" and is_tsec_event(event):
+        return "denryusen_tsec"
+    return source
 
 REASON_JA = {
     "toryo": "投了", "time_up": "時間切れ", "illegal_move": "反則負け",
@@ -32,6 +49,14 @@ REASON_JA = {
 
 
 import re as _re
+
+_TSEC_EVENT_RE = _re.compile(r"^dr\d{1,2}tsec", _re.I)
+
+# SQLの島表計算で使う同義の判定式 (lower + GLOB。上のregexと一致させる)
+_TSEC_SQL = ("(lower(event) GLOB 'dr[0-9]tsec*' "
+             "OR lower(event) GLOB 'dr[0-9][0-9]tsec*')")
+_CLASSIFIED_SRC_SQL = (f"CASE WHEN source='denryusen' AND {_TSEC_SQL} "
+                       "THEN 'denryusen_tsec' ELSE source END")
 
 # 電竜戦: event接頭辞 → ビューアURLの大会ID (フォルダ)。
 # 接頭辞は不規則で規則化できないもの (獅子王戦・後援大会・実験対局や、
@@ -245,10 +270,12 @@ class PrecedentReader:
                 "SELECT MAX(game_id) FROM games").fetchone()[0]
             if self._intervals is None or self._intervals_max_gid != max_gid:
                 self._intervals = self.conn.execute(
-                    "SELECT source, MIN(game_id), MAX(game_id) FROM "
-                    "(SELECT source, game_id, game_id - ROW_NUMBER() OVER "
-                    " (PARTITION BY source ORDER BY game_id) AS grp FROM games) "
-                    "GROUP BY source, grp").fetchall()
+                    "SELECT src, MIN(game_id), MAX(game_id) FROM "
+                    "(SELECT src, game_id, game_id - ROW_NUMBER() OVER "
+                    " (PARTITION BY src ORDER BY game_id) AS grp FROM "
+                    f" (SELECT {_CLASSIFIED_SRC_SQL} AS src, game_id "
+                    "   FROM games)) "
+                    "GROUP BY src, grp").fetchall()
                 self._intervals_max_gid = max_gid
             return self._intervals
 
@@ -430,12 +457,23 @@ class PrecedentReader:
                     condition += self._source_condition(sources)
                 except sqlite3.OperationalError:
                     # window関数の無い古いSQLite: 結合側で絞る (走査は遅くなる)
+                    tsec = _TSEC_SQL.replace("event", "g.event")
+                    parts = []
                     names = ",".join(f"'{s}'" for s in sources
-                                     if s in KNOWN_SOURCES)
-                    parts = [f"g.source IN ({names})"] if names else []
+                                     if s in ("floodgate", "wcsc"))
+                    if names:
+                        parts.append(f"g.source IN ({names})")
+                    has_dr = "denryusen" in sources
+                    has_tsec = "denryusen_tsec" in sources
+                    if has_dr and has_tsec:
+                        parts.append("g.source = 'denryusen'")
+                    elif has_dr:
+                        parts.append(f"(g.source = 'denryusen' AND NOT {tsec})")
+                    elif has_tsec:
+                        parts.append(f"(g.source = 'denryusen' AND {tsec})")
                     if "other" in sources:
-                        known = ",".join(f"'{s}'" for s in KNOWN_SOURCES)
-                        parts.append(f"g.source NOT IN ({known})")
+                        parts.append("g.source NOT IN "
+                                     "('floodgate','wcsc','denryusen')")
                     condition += "AND (" + (" OR ".join(parts) or "0") + ")"
             rows = self.conn.execute(
                 "SELECT g.game_id, g.event, g.source, g.started_at, "
@@ -546,13 +584,14 @@ def compute_source_intervals(db_path: str | Path, progress=None,
         intervals: list[tuple[str, int, int]] = []
         run_src, run_lo, run_hi = None, 0, 0
         cursor = conn.execute(
-            "SELECT game_id, source FROM games ORDER BY game_id")
+            "SELECT game_id, source, event FROM games ORDER BY game_id")
         done = 0
         while True:
             rows = cursor.fetchmany(batch)
             if not rows:
                 break
-            for gid, src in rows:
+            for gid, raw_src, event in rows:
+                src = classified_source(raw_src, event)
                 if src == run_src and gid == run_hi + 1:
                     run_hi = gid
                 else:
@@ -582,14 +621,15 @@ def extend_source_intervals(db_path: str | Path, intervals,
     conn = open_read_only(db_path)
     try:
         rows = conn.execute(
-            "SELECT game_id, source FROM games WHERE game_id > ? "
+            "SELECT game_id, source, event FROM games WHERE game_id > ? "
             "ORDER BY game_id", (since_gid,)).fetchall()
     finally:
         conn.close()
     intervals = list(intervals)
     if not rows:
         return intervals, since_gid, 0
-    for gid, src in rows:
+    for gid, raw_src, event in rows:
+        src = classified_source(raw_src, event)
         if intervals and intervals[-1][0] == src and intervals[-1][2] == gid - 1:
             intervals[-1] = (src, intervals[-1][1], gid)
         else:
