@@ -149,6 +149,23 @@ def _day_url(day_str: str, name: str) -> str:
             f"{urllib.parse.quote(name)}")
 
 
+def days_behind(db_path: str | Path) -> int | None:
+    """DB内の最新floodgate対局からの経過日数 (JST)。floodgate棋譜が無ければ None。
+
+    起動時チェックの遡り日数をDB自身から決めるための補助。固定日数だと
+    「久しぶりの起動で取りこぼす / 毎回無駄に遡る」の両方が起きる。"""
+    conn = open_read_only(db_path)
+    try:
+        row = conn.execute("SELECT MAX(started_at) FROM games "
+                           "WHERE source='floodgate'").fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    last = datetime.strptime(row[0][:10], "%Y-%m-%d").date()
+    return max((datetime.now(JST).date() - last).days, 0)
+
+
 def update_once(db_path: str | Path, mirror_dir: str | Path,
                 days: int = 2, log_line=None,
                 dates: "list[date] | None" = None) -> UpdateResult:

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import queue
-import random
 import sys
 import threading
 import time
@@ -39,7 +38,7 @@ from kifudb.query import (DEFAULT_PAGE_SIZE as PAGE_SIZE,  # noqa: E402
                           PrecedentReader, REASON_JA,
                           compute_source_intervals, tournament_label)
 from kifudb.db import open_for_write, open_read_only, resolve_db_path  # noqa: E402
-from kifudb.floodgate import update_once  # noqa: E402
+from kifudb.floodgate import days_behind, update_once  # noqa: E402
 from kifudb.ingest import (KIFU_SUFFIXES, detect_source,  # noqa: E402
                            ingest_folder)
 from kifudb.query import extend_source_intervals  # noqa: E402
@@ -95,11 +94,11 @@ DEFAULT_PRIVATE_DB = Path(__file__).resolve().parent.parent / "data" / "private.
 # サンプルDBを使う場合は「DB更新...」の「参照...」で選び直す。無ければ確認の
 # 上で空のDBを新規作成する (_ensure_db) ので、CLIなしでゼロから始められる。
 DEFAULT_PUBLIC_DB = Path(__file__).resolve().parent.parent / "data" / "csa.db"
-# 自動更新の実行タイミング: 毎時この分を窓の開始とし、ジッタ秒を足して実行。
-# :20/:50 + 0〜300秒 = 対局開始 (:00/:30) の5〜10分前のどこか。全利用者が
-# 同一秒にwdoorへ殺到しないよう、起動ごとのランダムなずれで分散させる。
-AUTO_UPDATE_MINUTES = (20, 50)
-AUTO_UPDATE_JITTER = 300
+# 起動時チェックで自動的に遡る日数の上限。DB内の最新floodgate対局からの
+# 空きがこれを超える場合は取りに行かず、手動の再走査を案内する — 大きい
+# 取得ほど明示的なユーザー操作で行う (常駐ポーリングではなく「ユーザーの
+# 操作に応えて取りに行く」道具に留めるための方針)。
+STARTUP_CHECK_MAX_DAYS = 7
 # 島表 (出典→game_id区間) の永続キャッシュ。DBが変わらない限り起動時の
 # 再計算 (gamesテーブル全走査) を丸ごと省ける。
 INTERVALS_CACHE_PATH = RUNTIME_DIR / "source_intervals.json"
@@ -202,8 +201,6 @@ class PrecedentViewer:
         self._db_jobs: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self._db_job_running: str | None = None
         self._floodgate_queued = False   # floodgateジョブの重複投入防止
-        self._auto_update_after: str | None = None  # スケジューラのafter ID
-        self._auto_jitter = random.randint(0, AUTO_UPDATE_JITTER)  # 群れ分散
         self._update_win: tk.Toplevel | None = None
         self._update_log_lines: list[str] = []  # ウィンドウ再表示用の履歴
         self._name_db_query: str | None = None  # DB側に適用中の名前フィルタ
@@ -215,10 +212,11 @@ class PrecedentViewer:
             self.db_var.set(norm_db_path(sys.argv[1]))
         self._prime_source_intervals()  # 起動直後から先読みを始める
         threading.Thread(target=self._db_worker, daemon=True).start()
-        self._schedule_auto_update()
         self._poll_sync_file()
         # 追従ONなら起動直後に現在局面を表示するところまで行う
         self.root.after(200, self._initial_sync_search)
+        # 起動時の新規棋譜チェック (ウィンドウ表示を待ってから)
+        self.root.after(1200, self._startup_floodgate_check)
 
     def _setup_fonts(self) -> None:
         import tkinter.font as tkfont
@@ -243,7 +241,7 @@ class PrecedentViewer:
         ttk.Entry(top, textvariable=self.db_var).grid(
             row=0, column=1, sticky=tk.EW, padx=4)
         ttk.Button(top, text="参照...", command=self._browse_db).grid(row=0, column=2)
-        self.auto_update_var = tk.BooleanVar(value=False)
+        self.startup_check_var = tk.BooleanVar(value=True)
         self.sfen_db_var = tk.StringVar(value=str(DEFAULT_SFEN_DB))
         # floodgate更新・公開棋譜の取り込み先DB。ビューアの表示DBに追従させると
         # .sfen DB等を開いている間の自動サイクルが誤爆するため、固定で持つ。
@@ -416,7 +414,7 @@ class PrecedentViewer:
         self.more_button = ttk.Button(bottom, text=f"さらに{PAGE_SIZE}件表示",
                                       command=self._load_more, state=tk.DISABLED)
         self.more_button.pack(side=tk.RIGHT, padx=6)
-        # DB更新の稼働表示 (自動更新ON時に「次回 :55」等を控えめに出す)
+        # DB更新の稼働表示 (更新ジョブ実行中に控えめに出す)
         self.update_status_var = tk.StringVar(value="")
         ttk.Label(bottom, textvariable=self.update_status_var,
                   foreground="gray").pack(side=tk.RIGHT, padx=(0, 8))
@@ -746,7 +744,8 @@ class PrecedentViewer:
         """floodgate更新の対象DB (固定設定)。無効なら通知して None。
 
         手動操作 (quiet=False) でDBファイルが無ければ新規作成を提案する。
-        自動更新 (quiet=True) はダイアログを出せないためログに残してスキップ。"""
+        起動時チェック等 (quiet=True) はダイアログを出せないため
+        ログに残してスキップ。"""
         db_path = norm_db_path(self.fg_db_var.get())
         if not db_path:
             message = "公開前例DBが未指定です"
@@ -865,42 +864,46 @@ class PrecedentViewer:
             if reader is not None and reader.db_path == db_path:
                 reader.set_source_intervals(new_iv, new_mg)
 
-    # -- 自動更新スケジューラ (毎時 :20/:50 + ジッタ、壁時計アンカー) --------
+    # -- 起動時の新規棋譜チェック --------------------------------------------
 
-    def _schedule_auto_update(self) -> None:
-        if self._auto_update_after is not None:
-            self.root.after_cancel(self._auto_update_after)
-            self._auto_update_after = None
-        if not self.auto_update_var.get():
-            self._set_update_status()
+    def _startup_floodgate_check(self) -> None:
+        """起動時に1回だけ、公開前例DBの空きぶんの新規棋譜を取りに行く。
+
+        遡り日数はDB内の最新floodgate対局から逆算する (固定日数だと
+        「久しぶりの起動で取りこぼす / 毎回無駄に遡る」の両方が起きる)。
+        空きが STARTUP_CHECK_MAX_DAYS を超える場合は自動では取得せず、
+        手動の再走査を案内する — 大きい取得ほど明示的な操作で行う方針。
+        周期的な常時更新が必要な場合は tools/update_floodgate.py +
+        cron/タスクスケジューラを使う (README参照)。"""
+        if not self.startup_check_var.get():
             return
-        now = datetime.now()
-        hour_base = now.replace(minute=0, second=0, microsecond=0)
-        jitter = timedelta(seconds=self._auto_jitter)
-        candidates = [hour_base + timedelta(hours=h, minutes=m) + jitter
-                      for h in (0, 1) for m in AUTO_UPDATE_MINUTES]
-        self._auto_next_time = min(t for t in candidates if t > now)
-        delay_ms = max(int((self._auto_next_time - now).total_seconds() * 1000),
-                       1000)
-        self._auto_update_after = self.root.after(delay_ms,
-                                                  self._auto_update_fire)
-        self._set_update_status()
+        db_path = self._floodgate_target_db(quiet=True)
+        if db_path is None:
+            return
 
-    def _auto_update_fire(self) -> None:
-        self._auto_update_after = None
-        self._enqueue_floodgate("自動", quiet=True)
-        self._schedule_auto_update()
+        def decide():  # MAX(started_at) の走査があるためワーカーで
+            gap = days_behind(db_path)
+            if gap is None:
+                days = 2   # floodgate棋譜のない新しいDB: 今日から収集を始める
+            elif gap + 1 > STARTUP_CHECK_MAX_DAYS:
+                self._ulog(f"[floodgate] 最終取り込みから{gap}日空いています。"
+                           f"起動時チェックの対象外のため、「DB更新...」の"
+                           f"再走査 ({gap + 1}日) で追いついてください")
+                return
+            else:
+                days = max(gap + 1, 2)  # +1=日付跨ぎの余裕
+            self.root.after(0, lambda: self._enqueue_floodgate(
+                "起動時", days=days, quiet=True))
 
-    def _on_auto_update_toggle(self) -> None:
+        threading.Thread(target=decide, daemon=True).start()
+
+    def _on_startup_check_toggle(self) -> None:
         self._save_config()
-        self._schedule_auto_update()
 
     def _set_update_status(self) -> None:
         parts = []
         if self._db_job_running:
             parts.append(f"DB更新中: {self._db_job_running}")
-        if self.auto_update_var.get() and self._auto_update_after is not None:
-            parts.append(f"自動更新 次回 {self._auto_next_time:%H:%M}")
         self.update_status_var.set(" / ".join(parts))
 
     def _ulog(self, message: str) -> None:
@@ -970,16 +973,15 @@ class PrecedentViewer:
                   foreground="gray", wraplength=630, justify=tk.LEFT).pack(
             anchor=tk.W, pady=(4, 0))
 
-        fg_frame = ttk.LabelFrame(win, text="floodgate 逐次更新 (公開前例DBへ)",
+        fg_frame = ttk.LabelFrame(win, text="floodgate 更新 (公開前例DBへ)",
                                   padding=8)
         fg_frame.pack(fill=tk.X, padx=8, pady=4)
-        minutes = "/".join(f":{m:02d}" for m in AUTO_UPDATE_MINUTES)
         ttk.Checkbutton(
             fg_frame,
-            text="対局開始の5〜10分前に新規棋譜を自動取得"
-                 f" (毎時 {minutes} から数分ずらして実行)",
-            variable=self.auto_update_var,
-            command=self._on_auto_update_toggle).pack(anchor=tk.W)
+            text="起動時に新規棋譜を確認する (遡り日数はDBの最新対局から自動計算、"
+                 f"最大{STARTUP_CHECK_MAX_DAYS}日)",
+            variable=self.startup_check_var,
+            command=self._on_startup_check_toggle).pack(anchor=tk.W)
         row = ttk.Frame(fg_frame)
         row.pack(anchor=tk.W, pady=(6, 0))
         ttk.Button(row, text="今すぐ更新",
@@ -996,8 +998,9 @@ class PrecedentViewer:
                    ).pack(side=tk.LEFT, padx=(4, 0))
         ttk.Label(fg_frame,
                   text="取り込み済み・不成立のファイルは削除されます。未終局は保持して"
-                       "次サイクルで再確認、解析エラーのファイルは data/floodgate/ に"
-                       "残ります。自動更新はこのウィンドウを閉じても動き続けます。",
+                       "次回再確認、解析エラーのファイルは data/floodgate/ に残ります。"
+                       "常時の周期更新が必要な場合は tools/update_floodgate.py を"
+                       "cron/タスクスケジューラで回してください (README参照)。",
                   foreground="gray", wraplength=620, justify=tk.LEFT).pack(
             anchor=tk.W, pady=(6, 0))
 
@@ -1608,7 +1611,8 @@ class PrecedentViewer:
             config = json.loads(CONFIG_PATH.read_text())
             self.db_var.set(config.get("db_path", ""))
             self.sfen_var.set(config.get("last_sfen", ""))
-            self.auto_update_var.set(bool(config.get("floodgate_auto_update")))
+            self.startup_check_var.set(
+                bool(config.get("floodgate_startup_check", True)))
             self.sync_var.set(bool(config.get("sync_follow", True)))
             # 旧設定からの移行: 対象DB未設定なら当時のビューアDB、それも
             # 無ければ既定パス (data/csa.db) を使う
@@ -1630,7 +1634,7 @@ class PrecedentViewer:
             CONFIG_PATH.write_text(json.dumps({
                 "db_path": norm_db_path(self.db_var.get()),
                 "last_sfen": self.sfen_var.get().strip(),
-                "floodgate_auto_update": self.auto_update_var.get(),
+                "floodgate_startup_check": self.startup_check_var.get(),
                 "sync_follow": self.sync_var.get(),
                 "floodgate_db_path": norm_db_path(self.fg_db_var.get()),
                 "private_db_path": norm_db_path(self.private_db_var.get()),
