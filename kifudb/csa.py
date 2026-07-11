@@ -75,6 +75,7 @@ _MOVE_RE = re.compile(r"^([+-])(\d\d)(\d\d)([A-Z]{2})$")
 # Engine analysis comment: '** <eval> [pv...] (floodgate/WCSC/Denryu-sen;
 # also accepts single-star variants). Free-text comments never match.
 _EVAL_COMMENT_RE = re.compile(r"^'\*{1,2}\s*([+-]?\d+)(?:\s+(.+))?$")
+_BUOY_COMMENT_RE = re.compile(r"^buoy game starting with (\d+) moves?", re.I)
 _CSA_PV_TOKEN_RE = re.compile(r"^([+-])(\d\d)(\d\d)([A-Z]{2})$")
 
 
@@ -89,6 +90,8 @@ class GameRecord:
     sfen_keys: list[int] = field(default_factory=list)  # position key per ply, len = moves+1
     result: int | None = None     # RESULT_* or None
     end_reason: str = ""          # normalized token, "" = unfinished
+    buoy_moves: int = 0           # "'buoy game starting with N moves" のN
+                                  # (=サーバーが事前に並べた指定手順の手数)
     finished: bool = False
     parse_warnings: list[str] = field(default_factory=list)
     # Engine analysis, one slot per position (len = moves+1 when present).
@@ -202,6 +205,13 @@ def parse_csa(text: str, source_name: str = "") -> GameRecord:
                     summary_result = RESULT_WHITE if p1 == rec.black_name else RESULT_BLACK
             elif body.startswith("$END_TIME:") or body.startswith("$START_TIME:"):
                 pass  # informational
+            else:
+                # buoy対局: サーバーが事前に並べた手数の宣言 (全buoy棋譜に
+                # 存在することを実データ7,077件で確認済み)。指定手順の
+                # 分離 (ingest.py) の一次情報になる。
+                m_buoy = _BUOY_COMMENT_RE.match(body)
+                if m_buoy:
+                    rec.buoy_moves = int(m_buoy.group(1))
             continue
         if st.startswith("V"):
             continue

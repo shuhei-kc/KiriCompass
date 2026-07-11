@@ -66,16 +66,15 @@ def detect_source(event_or_name: str) -> str:
 
 
 def _buoy_designated(event: str) -> "tuple[int, str | None]":
-    """buoy対局の指定手順 (サーバー上で事前に並べられた手順) を event名から得る。
+    """buoy対局の指定手順の手数を event名から得る (棋譜コメントの代替)。
 
-    shogi-server の buoy対局は「開始手数 N」を対局名に含む:
+    shogi-server の buoy対局名は指定手順の手数 N を含む:
         <大会>+buoy_<局面名>_<N>_<先手>_<後手>-<持時間>-<f>+<先手>+<後手>+<時刻>
-    N手目開始 = 指定手順は N-1 手。この手順は対局エンジンが選んだ手ではない
-    (TSECの指定局面・本戦の入札手順等) ため、統計から分離する根拠になる。
-    戻り値: (指定手数 N-1, グループキー = buoy名のNまで)。buoyでない・Nが
-    無い・N=1 (平手開始) は (0, None)。
-    実DBのbuoy全10,090局で対局者名アンカーの不一致ゼロ、354グループの
-    実測共通手順がすべて N-1 以上 (=Nより手前で分岐した例ゼロ) を確認済み。"""
+    N = サーバーが事前に並べた手数 (棋譜内の「'buoy game starting with N
+    moves」コメントと同義。実ファイル10,200件で両者の一致を確認済み)。
+    一次情報はコメント (rec.buoy_moves) で、本関数はコメントを持たない
+    経路 (既存DBの移行) 用。戻り値: (N, 表示用の回戦名)。
+    buoyでない・Nが無い場合は (0, None)。"""
     parts = event.split("+")
     if len(parts) < 5 or not parts[1].startswith("buoy_"):
         return 0, None
@@ -84,14 +83,17 @@ def _buoy_designated(event: str) -> "tuple[int, str | None]":
     head = buoy[:idx] if idx > 0 else buoy
     for seg in reversed(head.split("_")):
         if seg.isdigit():
-            n = int(seg)
-            if n >= 2:
-                return n - 1, head
-            return 0, None
-    return 0, None
+            return int(seg), _round_label(head)
+    return 0, _round_label(head)
 
 
-def _ensure_designated_game(conn: sqlite3.Connection, event: str, head: str,
+def _round_label(head: str) -> str:
+    """buoy名から表示用の回戦名を作る (先後入替の bottom/top は同一視)。"""
+    label = head[len("buoy_"):] if head.startswith("buoy_") else head
+    return re.sub(r"-(?:bottom|top)(?=_\d+$|$)", "", label)
+
+
+def _ensure_designated_game(conn: sqlite3.Connection, event: str, label: str,
                             buoy_ply: int, rec, source: str,
                             touched_keys: set) -> None:
     """指定手順を「擬似対局」として1回だけ登録・索引する。
@@ -99,8 +101,14 @@ def _ensure_designated_game(conn: sqlite3.Connection, event: str, head: str,
     .sfen の課題局面 (sfen_ingest.py) と同型: 同じ指定局面を戦う全対局の
     共通手順は、この擬似対局1行だけが背負う。前例一覧では終局理由
     「指定局面」の行として見え、勝敗は持たない (result NULL) ので勝率にも
-    入らない。event はグループキー由来で INSERT OR IGNORE により重複しない。"""
-    pseudo_event = f"{event.split('+', 1)[0]}+{head}#指定局面"
+    入らない。重複排除キーは指定手順の内容ハッシュ — 同じ回戦の対局は
+    buoy名 (先後入替の bottom/top 等) が違っても同一の指定局面なので、
+    名前でなく手順そのもので1つにまとめる (実データ621組の bottom/top
+    ペア全てで手順の完全一致を確認済み)。"""
+    prefix = array.array("H", rec.moves[:buoy_ply]).tobytes()
+    digest = hashlib.blake2b(
+        prefix + (rec.initial_sfen or "").encode(), digest_size=4).hexdigest()
+    pseudo_event = f"{event.split('+', 1)[0]}+{digest}#指定局面"
     keys = rec.sfen_keys[:buoy_ply + 1]
     # 指定手順自身のハンドシェイク (初期局面に戻る前置き) はさらに除外。
     # 手順全体が初期局面に戻るだけなら、索引すべき区間が無いので登録しない。
@@ -115,9 +123,10 @@ def _ensure_designated_game(conn: sqlite3.Connection, event: str, head: str,
         "INSERT OR IGNORE INTO games (event, source, started_at, black_name, "
         "white_name, result, end_reason, ply_count, initial_sfen, moves) "
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (pseudo_event, source, rec.start_time, head[len("buoy_"):],
+        (pseudo_event, source, rec.start_time,
+         label or f"指定{buoy_ply}手",
          "(指定手順)", None, "designated", buoy_ply, rec.initial_sfen,
-         array.array("H", rec.moves[:buoy_ply]).tobytes()))
+         prefix))
     if cursor.rowcount == 0:
         return  # 同じ指定局面の別対局が登録済み
     game_id = cursor.lastrowid
@@ -407,9 +416,11 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
     # を対局本体の索引から外し、代わりに「指定手順」擬似対局として1回だけ
     # 索引する — 指定局面までの手はこの対局のエンジンが選んだ手ではなく、
     # そのまま数えると序盤統計が汚れるため (.sfenの課題局面と同じ扱い)。
-    buoy_ply, buoy_head = _buoy_designated(event)
+    # 手数の一次情報は棋譜内コメント (rec.buoy_moves)、無ければbuoy名のN。
+    name_ply, buoy_label = _buoy_designated(event)
+    buoy_ply = getattr(rec, "buoy_moves", 0) or name_ply
     if start_ply < buoy_ply < n_moves:
-        _ensure_designated_game(conn, event, buoy_head, buoy_ply, rec,
+        _ensure_designated_game(conn, event, buoy_label, buoy_ply, rec,
                                 source, touched_keys)
         start_ply = buoy_ply
     rows = []
