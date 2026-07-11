@@ -65,6 +65,7 @@ _CLASSIFIED_SRC_SQL = (f"CASE WHEN source='denryusen' AND {_TSEC_SQL} "
 # 表は tools/download_denryusen.py が実ダウンロードから生成する
 # data/denryusen_prefix_map.txt を基にした (最頻フォルダを採用)。
 _DENRYU_PREFIX_MAP = {
+    "dr7tsec": "dr7_tsec7",      # TSEC7はフォルダ名が drN_tsec 規則から外れる
     "shishio3": "dr2_exhi2",     # 獅子王戦3
     "dr2ex2": "dr2_exhi2",
     "dr2long": "dr2_exhi1",      # 長時間エキシビション

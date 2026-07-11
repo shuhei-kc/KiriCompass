@@ -32,7 +32,6 @@ BASE = "https://denryu-sen.jp/denryusen"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "denryusen"
 MAP_OUT = Path(__file__).resolve().parent.parent / "data" / "denryusen_prefix_map.txt"
 
-# dr7_tsec7 は開催前のため既定では対象外。
 TOURNAMENTS = [
     "dr1_production",
     "dr2_production", "dr2_tsec", "dr2_exhi1", "dr2_exhi2",
@@ -41,7 +40,12 @@ TOURNAMENTS = [
     "dr4_patronage_do3",
     "dr5_production", "dr5_tsec", "dr5_hardware3",
     "dr6_production", "dr6_tsec",
+    "dr7_tsec7",     # TSEC7 (2026-07開催。フォルダ名が drN_tsec 規則から外れる)
 ]
+
+# 終局済みCSAの目印: %トークン行 (%TORYO等) か summary行。どちらも無い
+# ローカルファイルは大会進行中に落とした未終局とみなし、再取得の対象にする。
+_FINISHED_MARKERS = (b"\n%", b"'summary:")
 
 _STEM_RE = re.compile(r'kifujs/([^"]+?)\.html')
 
@@ -59,9 +63,24 @@ def list_events(tid: str) -> list[str]:
     return out
 
 
+def _looks_finished(path: Path) -> bool:
+    """ローカルCSAが終局済みらしいか (末尾に%トークンかsummary行があるか)。
+
+    大会進行中にダウンロードした未終局の棋譜を、次回実行で取り直すための
+    判定。終局済みなのに目印が無い古い例外 (初期TSECの技術的中断 約104局)
+    は毎回再取得になるが、実害は無い。"""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(path.stat().st_size - 4096, 0))
+            tail = f.read()
+        return any(marker in tail for marker in _FINISHED_MARKERS)
+    except OSError:
+        return False
+
+
 def download_one(tid: str, event: str, retries: int = 3) -> bool:
     out = DATA_DIR / tid / f"{event}.csa"
-    if out.exists() and out.stat().st_size > 0:
+    if out.exists() and out.stat().st_size > 0 and _looks_finished(out):
         return True
     url = f"{BASE}/{tid}/kifufiles/{event}.csa"
     for attempt in range(retries):
@@ -110,9 +129,24 @@ def main() -> None:
         total += n
         ok_total += ok
 
-    # event接頭辞 -> 最頻の大会ID を書き出す (query.py のマッピング生成用)
+    # event接頭辞 -> 最頻の大会ID を書き出す (query.py のマッピング生成用)。
+    # 既存のmapファイルとマージする: 一部の大会だけ実行しても、他大会の
+    # 実績が消えないように、今回走査した大会の列だけを置き換える。
+    import ast
+    merged: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
+    if MAP_OUT.is_file():
+        for line in MAP_OUT.read_text(encoding="utf-8").splitlines():
+            try:
+                prefix, _tid, counts = line.split("\t")
+                merged[prefix].update(ast.literal_eval(counts))
+            except (ValueError, SyntaxError):
+                continue
+    for prefix, counter in prefix_counts.items():
+        for tid in targets:            # 今回の実測でその大会の列を上書き
+            merged[prefix].pop(tid, None)
+        merged[prefix].update(counter)
     lines = []
-    for prefix, counter in sorted(prefix_counts.items()):
+    for prefix, counter in sorted(merged.items()):
         tid = counter.most_common(1)[0][0]
         lines.append(f"{prefix}\t{tid}\t{dict(counter)}")
     MAP_OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
