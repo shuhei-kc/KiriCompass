@@ -8,20 +8,20 @@
 
 ## 配布DB
 
-構築済みのDBを以下で配布している (7z形式):
+構築済みのDBを以下で配布している:
 
 https://drive.google.com/drive/u/0/folders/1ZyKwR-fZS2WIG26tmdK1BZLDPB94HcUm
 
-- **フルDB** `csa.db` — floodgate 2017年以降 + WCSC 第28回以降 +
+- **フルDB** `csa.7z` — floodgate 2017年以降 + WCSC 第28回以降 +
   電竜戦 全大会 (TSEC含む)。約105.8万局 (2026-07-12時点)。
-  7z 約4.0GB、展開後 約7.2GB
-- **サンプルDB** `csa_sample.db` — floodgate 2026年分 + WCSC36 +
-  電竜戦第6回本戦。約6.9万局、展開後 469MB
+  7z 約4.0GB、展開すると `csa.db` (約7.2GB)
+- **サンプルDB** `csa.db` — floodgate 2026年分 + WCSC36 +
+  電竜戦第6回本戦。約6.9万局、469MB。無圧縮なのでダウンロードして
+  そのまま使える
 
-ダウンロードした .db は `KiriCompass/data/` に置けばそのまま使える
-(ビューアの「参照...」で別の場所を選んでもよい)。フルDBを `data/csa.db`
-として置けば、公開前例DBの既定パスに一致し、起動時のfloodgate更新も
-そのまま効く。
+どちらも最終的に `csa.db` になるので、`KiriCompass/data/` に置くだけで
+公開前例DBの既定パスに一致し、起動時のfloodgate更新もそのまま効く
+(ビューアの「参照...」で別の場所を選んでもよい)。
 
 ## 使い方
 
