@@ -192,9 +192,10 @@ def save_interval_sidecar(db_path: str, intervals, max_gid: int,
 RESULT_JA = {1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
 WINNER_JA = {1: "先", 2: "後"}  # それ以外 (引分・結果なし) は "-"
 
-# Xポスト文言のテンプレート。runtime/post_template.txt を編集すれば
-# 再起動なしで反映される (ファイルがない時にこの内容で自動生成。
-# デフォルトに戻したい時はファイルを削除する)。
+# 「Xでポスト」は隠し機能: 起動時に runtime/post_template.txt が存在する
+# 場合にのみボタンが現れる (作者の個人用途。有効化したい人だけが自分で
+# ファイルを置く。空ファイルなら下のデフォルト文面が使われ、内容を書けば
+# それがテンプレートになり再起動なしで反映される)。
 # 使える変数: {tournament} {black} {white} {date} {ply} {next_move}
 #             {result} {reason} {ply_count} {source} {event} {url}
 POST_TEMPLATE_FILE = RUNTIME_DIR / "post_template.txt"
@@ -208,14 +209,10 @@ DEFAULT_POST_TEMPLATE = """{tournament}
 
 def load_post_template() -> str:
     try:
-        return POST_TEMPLATE_FILE.read_text(encoding="utf-8")
+        text = POST_TEMPLATE_FILE.read_text(encoding="utf-8")
     except OSError:
-        try:
-            POST_TEMPLATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            POST_TEMPLATE_FILE.write_text(DEFAULT_POST_TEMPLATE, encoding="utf-8")
-        except OSError:
-            pass
         return DEFAULT_POST_TEMPLATE
+    return text if text.strip() else DEFAULT_POST_TEMPLATE
 
 
 class PrecedentViewer:
@@ -469,10 +466,13 @@ class PrecedentViewer:
                                           command=self._copy_url,
                                           state=tk.DISABLED)
         self.copy_url_button.pack(fill=tk.X)
-        self.post_x_button = ttk.Button(detail_buttons, text="Xでポスト",
-                                        command=self._post_to_x,
-                                        state=tk.DISABLED)
-        self.post_x_button.pack(fill=tk.X, pady=(4, 0))
+        # 隠し機能: テンプレートファイルを置いた人にだけボタンを出す
+        self.post_x_button = None
+        if POST_TEMPLATE_FILE.is_file():
+            self.post_x_button = ttk.Button(detail_buttons, text="Xでポスト",
+                                            command=self._post_to_x,
+                                            state=tk.DISABLED)
+            self.post_x_button.pack(fill=tk.X, pady=(4, 0))
         self.copy_kifu_button = ttk.Button(detail_buttons, text="棋譜コピー",
                                            command=self._copy_kifu,
                                            state=tk.DISABLED)
@@ -1514,7 +1514,8 @@ class PrecedentViewer:
             return
         button_state = tk.NORMAL if p.url else tk.DISABLED
         self.copy_url_button.config(state=button_state)
-        self.post_x_button.config(state=button_state)
+        if self.post_x_button is not None:
+            self.post_x_button.config(state=button_state)
         self.copy_kifu_button.config(state=tk.NORMAL)
         self.open_file_button.config(state=tk.NORMAL)
         lines = [f"{p.black_name} vs {p.white_name}  "
