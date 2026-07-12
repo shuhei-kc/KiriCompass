@@ -16,7 +16,7 @@ https://drive.google.com/drive/u/0/folders/1ZyKwR-fZS2WIG26tmdK1BZLDPB94HcUm
   電竜戦 全大会 (TSEC含む)。約105.8万局 (2026-07-12時点)。
   7z 約4.0GB、展開すると `csa.db` (約7.2GB)
 - **サンプルDB** `csa.db` — floodgate 2026年分 + WCSC36 +
-  電竜戦第6回本戦。約6.9万局、469MB。無圧縮なのでダウンロードして
+  電竜戦第6回本戦。約6.9万局、466MB。無圧縮なのでダウンロードして
   そのまま使える
 
 どちらも最終的に `csa.db` になるので、`KiriCompass/data/` に置くだけで
