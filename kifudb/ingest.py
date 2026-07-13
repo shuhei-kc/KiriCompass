@@ -356,19 +356,14 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
         log.warning("error: %s (%s: %s)", path.name, type(exc).__name__, exc)
         return "error", f"{type(exc).__name__}: {exc}", None
 
-    # パース成功後のDB書き込みは、このファイル1件分をSAVEPOINTで囲う。
-    # 想定外の例外が起きても、この1件の書き込みだけロールバックして
-    # error として続行する (中途半端な games 行を残さない)。利用者環境固有の
-    # 壊れた棋譜など、事前に想定しきれない不良ファイルへの最終防衛。
-    conn.execute("SAVEPOINT ingest_file")
+    # パース後のDB書き込みも、想定外の例外はこの1ファイルだけ error にして
+    # 続行する (利用者環境固有の壊れた棋譜など、事前に想定しきれない不良への
+    # 最終防衛)。書き込みは「危険な計算をすべて先に済ませてから INSERT する」
+    # 順序 (_store_record) なので、ここが例外で抜けても中途半端な行は残らない。
+    # SQLiteのトランザクション制御には手を出さない (Python版差の副作用回避)。
     try:
-        result = _store_record(conn, path, rec, touched_keys, stats,
-                               pv_max_moves)
-        conn.execute("RELEASE SAVEPOINT ingest_file")
-        return result
+        return _store_record(conn, path, rec, touched_keys, stats, pv_max_moves)
     except Exception as exc:  # noqa: BLE001 - 1ファイルの不良で全体を止めない
-        conn.execute("ROLLBACK TO SAVEPOINT ingest_file")
-        conn.execute("RELEASE SAVEPOINT ingest_file")
         stats.errors += 1
         log.warning("error: %s (%s: %s)", path.name, type(exc).__name__, exc)
         return "error", f"{type(exc).__name__}: {exc}", None
@@ -377,7 +372,11 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
 def _store_record(conn: sqlite3.Connection, path: Path, rec,
                   touched_keys: set, stats: IngestStats,
                   pv_max_moves: int):
-    """パース済みレコードをDBへ書き込む (ファイル単位のsavepoint内で呼ぶ)。"""
+    """パース済みレコードをDBへ書き込む。
+
+    array packing 等「例外を投げ得る計算」はすべて最初の INSERT より前に
+    済ませる。こうすると _ingest_file 側の except で抜けても games 行が
+    中途半端に残らない (SAVEPOINTに頼らずに部分書き込みを防ぐ)。"""
     if not rec.finished:
         if not rec.moves:
             # Header-only record: the game never started (e.g. one side
@@ -392,6 +391,16 @@ def _store_record(conn: sqlite3.Connection, path: Path, rec,
     for warning in rec.parse_warnings:
         log.warning("%s: %s", path.name, warning)
 
+    # --- 例外を投げ得る計算 (array packing 等) は INSERT より前に済ませる ---
+    # ここで壊れた棋譜が弾かれても、まだ何も書き込んでいないので部分行が残らない。
+    moves_blob = array.array("H", rec.moves).tobytes()
+    analysis_blobs = None
+    if rec.has_analysis:
+        pvs = ([pv[:pv_max_moves] for pv in rec.pvs] if pv_max_moves < 255
+               else rec.pvs)
+        analysis_blobs = (analysis.encode_evals(rec.evals),
+                          analysis.encode_pvs(pvs))
+
     event = rec.event or path.stem
     source = detect_source(event)
     if source == "other":
@@ -400,11 +409,12 @@ def _store_record(conn: sqlite3.Connection, path: Path, rec,
         # 内容のハッシュを重複排除キーに含め、同名別対局は両方登録し、
         # 同一内容の複製だけを弾く。ハッシュは内容から決定的に決まるので、
         # DBから復元した棋譜の再取り込みでも同じ event になり二重登録しない。
-        content = (array.array("H", rec.moves).tobytes()
-                   + (rec.initial_sfen or "").encode())
+        content = moves_blob + (rec.initial_sfen or "").encode()
         suffix = "#" + hashlib.blake2b(content, digest_size=4).hexdigest()
         if not event.endswith(suffix):
             event += suffix
+
+    # --- ここから DB 書き込み (以降は例外を投げ得る計算を挟まない) ---
     cursor = conn.execute(
         "INSERT OR IGNORE INTO games "
         "(event, source, started_at, black_name, white_name, result, "
@@ -412,20 +422,16 @@ def _store_record(conn: sqlite3.Connection, path: Path, rec,
         "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (event, source, rec.start_time, rec.black_name,
          rec.white_name, rec.result, rec.end_reason, len(rec.moves),
-         rec.initial_sfen, array.array("H", rec.moves).tobytes()))
+         rec.initial_sfen, moves_blob))
     if cursor.rowcount == 0:
         stats.duplicates += 1
         log.info("duplicate, skipped: %s", path.name)
         return "duplicate", None, None
     game_id = cursor.lastrowid
 
-    if rec.has_analysis:
-        pvs = ([pv[:pv_max_moves] for pv in rec.pvs] if pv_max_moves < 255
-               else rec.pvs)
-        conn.execute(
-            "INSERT OR REPLACE INTO game_analysis VALUES (?,?,?)",
-            (game_id, analysis.encode_evals(rec.evals),
-             analysis.encode_pvs(pvs)))
+    if analysis_blobs is not None:
+        conn.execute("INSERT OR REPLACE INTO game_analysis VALUES (?,?,?)",
+                     (game_id, analysis_blobs[0], analysis_blobs[1]))
 
     # 電竜戦buoy等の「初期局面に戻る前置き手順(ハンドシェイク)」を索引から除外する。
     # 例: 開始4手が玉の往復 (5i5h 5a5b 5h5i 5b5a) で平手に戻り、その後に実戦。
