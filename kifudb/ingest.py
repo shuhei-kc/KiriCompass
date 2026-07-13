@@ -351,13 +351,33 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
         stats.errors += 1
         log.warning("error: %s (%s)", path.name, exc)
         return "error", str(exc), None
-    except Exception as exc:  # noqa: BLE001 - 1ファイルの不良で全体を止めない
-        # 想定外の形式によるパーサーの未捕捉例外も、そのファイルだけを
-        # error として台帳に記録し、フォルダ取り込みは続行する。
+    except Exception as exc:  # noqa: BLE001 - パース段階の想定外例外を隔離
         stats.errors += 1
         log.warning("error: %s (%s: %s)", path.name, type(exc).__name__, exc)
         return "error", f"{type(exc).__name__}: {exc}", None
 
+    # パース成功後のDB書き込みは、このファイル1件分をSAVEPOINTで囲う。
+    # 想定外の例外が起きても、この1件の書き込みだけロールバックして
+    # error として続行する (中途半端な games 行を残さない)。利用者環境固有の
+    # 壊れた棋譜など、事前に想定しきれない不良ファイルへの最終防衛。
+    conn.execute("SAVEPOINT ingest_file")
+    try:
+        result = _store_record(conn, path, rec, touched_keys, stats,
+                               pv_max_moves)
+        conn.execute("RELEASE SAVEPOINT ingest_file")
+        return result
+    except Exception as exc:  # noqa: BLE001 - 1ファイルの不良で全体を止めない
+        conn.execute("ROLLBACK TO SAVEPOINT ingest_file")
+        conn.execute("RELEASE SAVEPOINT ingest_file")
+        stats.errors += 1
+        log.warning("error: %s (%s: %s)", path.name, type(exc).__name__, exc)
+        return "error", f"{type(exc).__name__}: {exc}", None
+
+
+def _store_record(conn: sqlite3.Connection, path: Path, rec,
+                  touched_keys: set, stats: IngestStats,
+                  pv_max_moves: int):
+    """パース済みレコードをDBへ書き込む (ファイル単位のsavepoint内で呼ぶ)。"""
     if not rec.finished:
         if not rec.moves:
             # Header-only record: the game never started (e.g. one side

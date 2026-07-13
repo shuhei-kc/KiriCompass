@@ -158,7 +158,17 @@ class Position:
 
         frm/to are 0-based square indexes; frm == -1 means drop.
         ptype is the piece type *after* the move (CSA semantics).
+
+        Raises ValueError on out-of-range squares. This matters because a
+        corrupt kifu can carry a destination like "00" (→ -10 after 0-based
+        conversion); without this guard, Python's negative list indexing
+        silently "works" and produces a negative 16-bit code that later
+        blows up when packed as an unsigned short. Rejecting it here turns
+        such a move into a normal parse error, so the one bad file is
+        skipped and the folder ingest continues.
         """
+        if not 0 <= to <= 80:
+            raise ValueError(f"destination square out of range: {to}")
         captured = self.board[to]
         if captured is not None:
             self.hands[color][unpromote(captured[1])] += 1
@@ -167,6 +177,8 @@ class Position:
             self.board[to] = (color, ptype)
             code = to | ((81 + ptype) << 7)
         else:
+            if not 0 <= frm <= 80:
+                raise ValueError(f"source square out of range: {frm}")
             moving = self.board[frm]
             if moving is None or moving[0] != color:
                 raise ValueError(f"no piece of color {color} on square {frm}")

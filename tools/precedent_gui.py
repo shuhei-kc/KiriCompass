@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import logging.handlers
 import queue
 import sys
 import threading
@@ -112,6 +114,33 @@ WIN_HEADING_FONT_CANDIDATES = [
 ]
 
 CONFIG_PATH = RUNTIME_DIR / "gui_config.json"
+# 永続ログ。取り込み中のエラー (どのファイルで何が起きたか) はここに残る。
+# GUIの更新ログ窓は一時表示なので、閉じた後や落ちた後の追跡用に必須。
+LOG_FILE = RUNTIME_DIR / "kiricompass.log"
+
+
+def setup_file_logging() -> None:
+    """kifudb のログ (取り込みの逐次エラー等) を runtime/kiricompass.log に残す。
+
+    `_ingest_file` は不良ファイルを `error: <ファイル名> (...)` として
+    log.warning に出す。GUI単体ではこのロガーにハンドラが無く握り潰されて
+    いたため、どのファイルで失敗したか後から分からなかった。ここでファイル
+    ハンドラを付けることで、閉じた後・落ちた後でも原因ファイルを追える。"""
+    try:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s %(message)s"))
+        logger = logging.getLogger("kifudb")
+        logger.setLevel(logging.INFO)
+        # 二重起動でハンドラを重ねない
+        if not any(isinstance(h, logging.handlers.RotatingFileHandler)
+                   and getattr(h, "baseFilename", "") == str(LOG_FILE)
+                   for h in logger.handlers):
+            logger.addHandler(handler)
+    except OSError:
+        pass  # ログが書けなくても本体は動かす
 # floodgate逐次更新の一時保存フォルダ (取り込み後に削除される。詳細は
 # kifudb/floodgate.py)。未終局・エラーのファイルだけが一時的に残る。
 FLOODGATE_MIRROR = Path(__file__).resolve().parent.parent / "data" / "floodgate"
@@ -1024,6 +1053,8 @@ class PrecedentViewer:
     def _ulog(self, message: str) -> None:
         """更新ログ1行 (どのスレッドからでも呼べる)。"""
         line = f"{datetime.now():%H:%M:%S} {message}"
+        # 窓を閉じても・落ちても残るよう、ファイルにも常に書く
+        logging.getLogger("kifudb.gui").info(message)
 
         def append():
             self._update_log_lines.append(line)
@@ -1777,6 +1808,7 @@ def main() -> None:
                 pass
         sys.exit(message)
     setup_dpi_awareness()
+    setup_file_logging()
     root = tk.Tk()
     PrecedentViewer(root)
     root.mainloop()
