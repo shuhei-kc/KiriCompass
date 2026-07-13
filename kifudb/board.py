@@ -113,20 +113,35 @@ class Position:
         hands_str = parts[2] if len(parts) > 2 else "-"
         letter_to_type = {SFEN_LETTER[t]: t for t in range(14)}
 
+        if turn not in ("b", "w"):
+            raise ValueError(f"invalid sfen turn: {turn}")
+
         self.board = [None] * 81
         rows = board_str.split("/")
         if len(rows) != 9:
             raise ValueError(f"invalid sfen board: {board_str}")
         for rank, row in enumerate(rows):
             file_idx = 8
+            squares = 0
             promoted = False
             for ch in row:
                 if ch == "+":
+                    if promoted:
+                        raise ValueError(f"invalid sfen promotion: {row}")
                     promoted = True
                     continue
-                if ch.isdigit():
+                if ch in "123456789":
+                    if promoted:
+                        raise ValueError(f"invalid sfen promotion: {row}")
+                    squares += int(ch)
+                    if squares > 9:
+                        raise ValueError(f"invalid sfen rank width: {row}")
                     file_idx -= int(ch)
                     continue
+                if ch.isdigit():
+                    raise ValueError(f"invalid sfen digit: {ch}")
+                if squares >= 9:
+                    raise ValueError(f"invalid sfen rank width: {row}")
                 letter = ("+" if promoted else "") + ch.upper()
                 t = letter_to_type.get(letter)
                 if t is None:
@@ -134,13 +149,16 @@ class Position:
                 color = BLACK if ch.isupper() else WHITE
                 self.board[file_idx * 9 + rank] = (color, t)
                 file_idx -= 1
+                squares += 1
                 promoted = False
+            if promoted or squares != 9:
+                raise ValueError(f"invalid sfen rank width: {row}")
 
         self.hands = ({t: 0 for t in range(7)}, {t: 0 for t in range(7)})
         if hands_str != "-":
             count = 0
             for ch in hands_str:
-                if ch.isdigit():
+                if ch in "0123456789":
                     count = count * 10 + int(ch)
                     continue
                 t = letter_to_type.get(ch.upper())
@@ -149,6 +167,8 @@ class Position:
                 color = BLACK if ch.isupper() else WHITE
                 self.hands[color][t] += count or 1
                 count = 0
+            if count:
+                raise ValueError(f"invalid sfen hand: {hands_str}")
         self.turn = BLACK if turn == "b" else WHITE
 
     # -- CSA move application ---------------------------------------------
@@ -167,12 +187,22 @@ class Position:
         such a move into a normal parse error, so the one bad file is
         skipped and the folder ingest continues.
         """
+        if color not in (BLACK, WHITE):
+            raise ValueError(f"invalid side to move: {color}")
+        if color != self.turn:
+            raise ValueError(f"wrong side to move: {color}")
+        if not 0 <= ptype <= RY:
+            raise ValueError(f"invalid piece type: {ptype}")
         if not 0 <= to <= 80:
             raise ValueError(f"destination square out of range: {to}")
         captured = self.board[to]
-        if captured is not None:
-            self.hands[color][unpromote(captured[1])] += 1
         if frm < 0:  # drop
+            if ptype > HI:
+                raise ValueError(f"cannot drop promoted piece: {ptype}")
+            if captured is not None:
+                raise ValueError(f"drop destination is occupied: {to}")
+            if self.hands[color][ptype] <= 0:
+                raise ValueError(f"piece not in hand: {ptype}")
             self.hands[color][ptype] -= 1
             self.board[to] = (color, ptype)
             code = to | ((81 + ptype) << 7)
@@ -182,6 +212,10 @@ class Position:
             moving = self.board[frm]
             if moving is None or moving[0] != color:
                 raise ValueError(f"no piece of color {color} on square {frm}")
+            if captured is not None and captured[0] == color:
+                raise ValueError(f"cannot capture own piece on square {to}")
+            if captured is not None:
+                self.hands[color][unpromote(captured[1])] += 1
             promote = ptype != moving[1]
             if promote and unpromote(ptype) != moving[1]:
                 raise ValueError("inconsistent promotion in CSA move")

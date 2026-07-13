@@ -42,6 +42,21 @@ _TERMINALS = {"resign", "rep_draw"}
 TASK_SUFFIX = "#課題局面"          # 擬似対局のevent接尾辞 (連番の代わりの共通文言)
 
 
+def _escape_like(value: str) -> str:
+    """Return *value* as a literal fragment for ``LIKE ... ESCAPE '\\'``.
+
+    .sfen のバッチ識別子は利用者のファイル名から作る。``_`` と ``%`` は
+    SQLite の LIKE ではワイルドカードなので、エスケープしないと別バッチを
+    数えたり削除したりしてしまう。
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _batch_event_pattern(stem: str) -> str:
+    """Return a literal LIKE pattern for every event in one .sfen batch."""
+    return f"{_escape_like(stem)}#%"
+
+
 @dataclass
 class ParsedGame:
     lineno: int
@@ -245,8 +260,8 @@ def _find_batch_by_stem(conn: sqlite3.Connection, stem: str):
     台帳はフルパス鍵・対局は '<stem>#' 鍵なので、同名ファイルを別の場所から
     取り込むと両者の1:1対応が壊れる。取り込み前にここで検出する。"""
     for p, detail_json in conn.execute(
-            "SELECT path, detail FROM source_files WHERE path LIKE ?",
-            (f"%{stem}.sfen",)):
+            "SELECT path, detail FROM source_files WHERE path LIKE ? ESCAPE '\\'",
+            (f"%{_escape_like(stem)}.sfen",)):
         if Path(p).stem != stem:
             continue
         try:
@@ -404,8 +419,9 @@ def list_batches(db_path: str | Path) -> list[dict]:
                 continue
             stem = Path(path).stem
             games = conn.execute(
-                "SELECT COUNT(*) FROM games WHERE event LIKE ? AND event != ?",
-                (f"{stem}#%", f"{stem}{TASK_SUFFIX}")).fetchone()[0]
+                "SELECT COUNT(*) FROM games WHERE event LIKE ? ESCAPE '\\' "
+                "AND event != ?",
+                (_batch_event_pattern(stem), f"{stem}{TASK_SUFFIX}")).fetchone()[0]
             out.append({"path": path, "stem": stem, "status": status,
                         "label": detail.get("label", ""),
                         "date": (detail.get("date") or "")[:10],
@@ -422,7 +438,7 @@ def _delete_batch_rows(conn: sqlite3.Connection, stem: str) -> int:
     (日付バックフィルと同じ手法)。commit は呼び出し側が行う。"""
     games = conn.execute(
         "SELECT game_id, started_at, initial_sfen, moves FROM games "
-        "WHERE event LIKE ?", (f"{stem}#%",)).fetchall()
+        "WHERE event LIKE ? ESCAPE '\\'", (_batch_event_pattern(stem),)).fetchall()
     touched: set[int] = set()
     for game_id, started_at, initial_sfen, moves_blob in games:
         moves = array.array("H")
@@ -443,7 +459,8 @@ def _delete_batch_rows(conn: sqlite3.Connection, stem: str) -> int:
             [(key, sort_key, game_id, ply) for ply, key in enumerate(keys)])
         touched.update(keys)
     _refresh_stats(conn, touched)
-    conn.execute("DELETE FROM games WHERE event LIKE ?", (f"{stem}#%",))
+    conn.execute("DELETE FROM games WHERE event LIKE ? ESCAPE '\\'",
+                 (_batch_event_pattern(stem),))
     return len(games)
 
 
