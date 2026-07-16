@@ -92,7 +92,7 @@ class SfenIngestResult:
         if self.error:
             return self.error
         if self.conflict:
-            return "conflict: 既読部分が変更されています (削除→再取り込みで反映)"
+            return "競合: 既読部分が変更されています (削除→再取り込みで反映)"
         if self.unchanged:
             return "変更なし"
         parts = []

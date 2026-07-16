@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""KiriCompass 前例ビューア: sfenを貼り付けて前例DBを検索する。
+"""KiriCompass 前例ビューア: SFENを貼り付けて前例DBを検索する。
 
 起動:  python3 tools/precedent_gui.py [db_path]
 
-- sfen欄には "position sfen ...", "sfen ...", "startpos", 素のsfen の
+- SFEN欄には "position sfen ...", "sfen ...", "startpos", 素のSFEN の
   いずれを貼り付けてもよい。手数部分は無視される。
 - 前例をダブルクリックすると棋譜ビューアをブラウザで開く (URLが無い前例は
   棋譜のクリップボードコピーにフォールバック)。
@@ -12,8 +12,8 @@
   その内容を、なければDBから復元した棋譜を使う)。
   「ファイルで開く」ボタンは既定アプリで開く (新規ウィンドウ)。
 - 前例を選択すると、その局面での評価値と読み筋(記録があれば)を表示する。
-- 「将棋盤GUIの局面を追従」(既定ON) は、USIエンジン (tools/usi_engine.py) が
-  書き出すsyncファイルを追従して自動検索する。単体利用時はOFFにしてよい。
+- 「将棋盤GUIの局面に追従」(既定ON) は、USIエンジン (tools/usi_engine.py) が
+  書き出す同期ファイルを追従して自動検索する。単体利用時はOFFにしてよい。
 """
 
 from __future__ import annotations
@@ -363,7 +363,7 @@ class PrecedentViewer:
         # 追従チェックは検索ボタンの右
         self.sync_var = tk.BooleanVar(value=True)  # 既定で追従ON
         sync_check = ttk.Checkbutton(
-            top, text="将棋盤GUIの局面を追従",
+            top, text="将棋盤GUIの局面に追従",
             variable=self.sync_var, command=self._on_sync_toggle)
         sync_check.grid(row=1, column=3, sticky=tk.W, padx=(6, 0), pady=(6, 0))
         top.columnconfigure(1, weight=1)
@@ -517,7 +517,7 @@ class PrecedentViewer:
 
         bottom = ttk.Frame(self.root, padding=(8, 0, 8, 8))
         bottom.pack(fill=tk.X)
-        self.status_var = tk.StringVar(value="DBとsfenを指定して検索してください。")
+        self.status_var = tk.StringVar(value="DBとSFENを指定して検索してください。")
         # 右のボタン類を先に確保し、ステータスは残り幅に収めて切り詰める
         # (長いメッセージでもボタンを画面外へ押し出さないようにする)。
         self.more_button = ttk.Button(bottom, text=f"さらに{PAGE_SIZE}件表示",
@@ -567,7 +567,7 @@ class PrecedentViewer:
             return
         if not sfen:
             if not quiet:
-                messagebox.showerror("エラー", "sfenを貼り付けてください。")
+                messagebox.showerror("エラー", "SFENを貼り付けてください。")
             return
         self._save_config()
         self._prime_source_intervals()  # DBが変わっていたら先読みを開始
@@ -963,7 +963,8 @@ class PrecedentViewer:
                 stats = ingest_folder(
                     private_db, folder,
                     file_filter=lambda p: not is_public(p),
-                    progress=lambda i, n: self._ulog(f"[取り込み 私] {i}/{n}"))
+                    progress=lambda i, n: self._ulog(
+                        f"[取り込み プライベート] {i}/{n}"))
                 self._ulog(f"[取り込み プライベートDB] {stats.summary()}")
                 self._after_db_update(private_db)
             if not files:
@@ -1166,7 +1167,7 @@ class PrecedentViewer:
                   text="1ファイル=1バッチ。課題局面までの共通手順は「(共通)」名の"
                        "擬似対局として1回だけ登録される (終局理由列は「課題局面」)。"
                        "追記は自動で追加分のみ、既読部分が書き換わったファイルは "
-                       "conflict になる (削除→追加で編集を反映)。").pack(
+                       "競合として扱われます (削除→追加で編集を反映)。").pack(
             anchor=tk.W, pady=(4, 0))
         tree_holder = ttk.Frame(sfen_frame)
         tree_holder.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
@@ -1375,7 +1376,7 @@ class PrecedentViewer:
                 extra = (f" / 1ヶ月超スキップ {old}件" if old else "") + \
                         (f" / ファイル欠落 {missing}件" if missing else "")
                 self._ulog(f"[.sfen] 更新チェック完了: 確認 {len(targets)}件 / "
-                           f"追加 {added}局 / conflict {conflicts}件 / "
+                           f"追加 {added}局 / 競合 {conflicts}件 / "
                            f"変更なし {unchanged}件{extra}")
             finally:
                 self._sfen_refresh_queued = False
