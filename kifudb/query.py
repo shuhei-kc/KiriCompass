@@ -141,6 +141,11 @@ def _wcsc_url(event: str) -> str | None:
     if t is None:
         return None
     kind, num = t
+    # CSA公式棋譜集の配布名 (WCSC36-U7-nshogi-478shogi) からは、日時等を
+    # 含むライブビューア側の対局IDを復元できない。推測URLを出さず、GUI側の
+    # 棋譜コピー/ファイル表示フォールバックに任せる。
+    if _re.match(r"^wcsc\d+-[ulf]\d+-", event, _re.I):
+        return None
     if kind == "wcso":
         return f"http://live4.computer-shogi.org/wcso{num}/kifu/{event}.html"
     if num >= 36:

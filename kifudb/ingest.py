@@ -24,13 +24,20 @@ KIFU_SUFFIXES = {".csa", ".kif", ".kifu"}
 # 公開DBへ紛れ込む余地がある。全1,080,482件の実eventで一致を検証済み。
 # - floodgate:  wdoor+<棋戦>+<先手>+<後手>+<開始時刻14桁>。テスト対局室も
 #               含めてすべて floodgate 扱い (アーカイブとURL規則が同一のため)
-# - WCSC/WCSO:  wcscNN/wcsoNN + 区切り (+ か _)。WCSO は2020年オンライン開催
-#               (=第30回)。例外: WCSC28決勝の回次欠落形式 (WCSC_F1_...)
+# - WCSC/WCSO:  ライブ配信名は wcscNN/wcsoNN + 区切り (+ か _)。
+#               CSA公式棋譜集の配布名 (WCSC36-U7-nshogi-478shogi) も認識する。
+#               WCSO は2020年オンライン開催 (=第30回)。例外: WCSC28決勝の
+#               回次欠落形式 (WCSC_F1_...)
 # - 電竜戦:     <大会接頭辞>+...+<開始時刻14桁>。接頭辞は dr<数字> で始まる
 #               もの (将来の大会名への余裕) か、既知の変則接頭辞
 #               (獅子王戦・後援大会等 → query.py の解決表)
 _TS_TAIL_RE = re.compile(r"\+\d{14}$")
 _WCSC_EVENT_RE = re.compile(r"^wcs[co]\d+[+_]|^wcsc_f\d", re.I)
+# CSA公式棋譜集のファイル名。36回で従来の +/_ 区切りとは別に採用された形式。
+# 対局者名自体に '-' を含む例 (ponkotsu-test) があるため末尾を固定個数には
+# 分割せず、大会番号・予選区分(U/L)/決勝(F)・回戦・2名以上の構造だけを要求する。
+_WCSC_OFFICIAL_FILE_RE = re.compile(
+    r"^wcsc\d+-[ulf]\d+-.+-.+$", re.I)
 _DR_PREFIX_RE = re.compile(r"^dr\d", re.I)
 
 
@@ -51,7 +58,7 @@ def detect_source(event_or_name: str) -> str:
     event = event_or_name
     if event.lower().startswith("wdoor+") and _TS_TAIL_RE.search(event):
         return "floodgate"
-    if _WCSC_EVENT_RE.match(event):
+    if _WCSC_EVENT_RE.match(event) or _WCSC_OFFICIAL_FILE_RE.match(event):
         return "wcsc"
     if _TS_TAIL_RE.search(event):
         prefix = event.split("+", 1)[0]
@@ -403,6 +410,17 @@ def _store_record(conn: sqlite3.Connection, path: Path, rec,
 
     event = rec.event or path.stem
     source = detect_source(event)
+    # 公式配布CSAには、$EVENT が一意な対局IDではなく「第36回…二次予選7回戦」
+    # のような大会・回戦名だけのものがある。一方、配布ファイル名は大会番号・
+    # 回戦・対局者を含む一意な正式名である。内容側で出典を判定できず、ファイル名
+    # 側では判定できる場合は、出典と重複排除キーの双方に正式ファイル名を使う。
+    # GUIの公開/プライベート振り分けも同じ detect_source(path.stem) を使うため、
+    # 事前振り分けとDB内のsourceが一致する。
+    if source == "other":
+        filename_source = detect_source(path.stem)
+        if filename_source != "other":
+            event = path.stem
+            source = filename_source
     if source == "other":
         # 私的棋譜の event はファイル名語幹で、公開棋譜と違い一意性の保証が
         # ない (別フォルダの「対局1.kif」同士が別対局、はありがち)。指し手

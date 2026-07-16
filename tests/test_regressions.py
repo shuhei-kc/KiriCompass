@@ -9,11 +9,50 @@ from pathlib import Path
 from kifudb.board import Position
 from kifudb.csa import CsaParseError, parse_csa
 from kifudb.db import open_for_write
-from kifudb.ingest import ingest_folder
+from kifudb.ingest import detect_source, ingest_folder
+from kifudb.query import game_url
 from kifudb.sfen_ingest import delete_batch
 
 
 class RegressionTests(unittest.TestCase):
+    def test_wcsc_official_archive_filename_is_recognized(self) -> None:
+        self.assertEqual(
+            detect_source("WCSC36-U7-nshogi-478shogi"), "wcsc")
+        self.assertEqual(
+            detect_source("WCSC36-U1-ponkotsu-test-478shogi"), "wcsc")
+        for private_name in (
+                "WCSC36-研究メモ", "WCSC36-U7-onlyone", "WCSC36-X7-a-b"):
+            self.assertEqual(detect_source(private_name), "other")
+        self.assertEqual(
+            game_url("wcsc", "WCSC36+foo+bar"),
+            "https://www.computer-shogi.org/live/wcsc36/html/"
+            "WCSC36_foo_bar.html")
+
+    def test_wcsc_official_filename_overrides_descriptive_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "kifu"
+            folder.mkdir()
+            stem = "WCSC36-U7-nshogi-478shogi"
+            text = (
+                "V2.2\nN+nshogi\nN-478shogi\n"
+                "$EVENT:第36回世界コンピュータ将棋選手権二次予選7回戦\n"
+                "$START_TIME:2026/05/04 16:00:00\n"
+                "PI\n+\n+7776FU\n%TORYO\n")
+            (folder / f"{stem}.csa").write_bytes(text.encode("cp932"))
+            db_path = root / "test.db"
+
+            stats = ingest_folder(db_path, folder)
+            self.assertEqual((stats.added, stats.errors), (1, 0))
+            conn = open_for_write(db_path)
+            try:
+                event, source = conn.execute(
+                    "SELECT event, source FROM games").fetchone()
+            finally:
+                conn.close()
+            self.assertEqual((event, source), (stem, "wcsc"))
+            self.assertIsNone(game_url(source, event))
+
     def test_sfen_batch_delete_treats_underscore_as_literal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
