@@ -9,6 +9,7 @@ import logging
 import re
 import sqlite3
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import analysis, csa, kif
@@ -25,7 +26,8 @@ KIFU_SUFFIXES = {".csa", ".kif", ".kifu"}
 # - floodgate:  wdoor+<棋戦>+<先手>+<後手>+<開始時刻14桁>。テスト対局室も
 #               含めてすべて floodgate 扱い (アーカイブとURL規則が同一のため)
 # - WCSC/WCSO:  ライブ配信名は wcscNN/wcsoNN + 区切り (+ か _)。
-#               CSA公式棋譜集の配布名 (WCSC36-U7-nshogi-478shogi) も認識する。
+#               CSA公式棋譜集の配布名 (WCSC33〜36の
+#               WCSC36-U7-nshogi-478shogi 等) も認識する。
 #               WCSO は2020年オンライン開催 (=第30回)。例外: WCSC28決勝の
 #               回次欠落形式 (WCSC_F1_...)
 # - 電竜戦:     <大会接頭辞>+...+<開始時刻14桁>。接頭辞は dr<数字> で始まる
@@ -33,7 +35,8 @@ KIFU_SUFFIXES = {".csa", ".kif", ".kifu"}
 #               (獅子王戦・後援大会等 → query.py の解決表)
 _TS_TAIL_RE = re.compile(r"\+\d{14}$")
 _WCSC_EVENT_RE = re.compile(r"^wcs[co]\d+[+_]|^wcsc_f\d", re.I)
-# CSA公式棋譜集のファイル名。36回で従来の +/_ 区切りとは別に採用された形式。
+# CSA公式棋譜集のファイル名。33回以降で従来の +/_ 区切りとは
+# 別に使われている形式。
 # 対局者名自体に '-' を含む例 (ponkotsu-test) があるため末尾を固定個数には
 # 分割せず、大会番号・予選区分(U/L)/決勝(F)・回戦・2名以上の構造だけを要求する。
 _WCSC_OFFICIAL_FILE_RE = re.compile(
@@ -376,6 +379,142 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
         return "error", f"{type(exc).__name__}: {exc}", None
 
 
+_WCSC_ALIAS_TIME_TOLERANCE = timedelta(seconds=2)
+
+
+def _wcsc_time_bounds(started_at: str) -> tuple[str, str] | None:
+    """WCSCの配信版と公式版の記録時刻差を吸収する。
+
+    WCSC33の実データに、全指し手が同一で開始時刻だけ1秒異なる
+    1局がある。2秒より広げず、初期局面・全指し手の完全一致も別途
+    必須にすることで、同時刻帯の別対局を誤統合しない。
+    """
+    try:
+        value = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+    lo = value - _WCSC_ALIAS_TIME_TOLERANCE
+    hi = value + _WCSC_ALIAS_TIME_TOLERANCE
+    fmt = "%Y-%m-%d %H:%M:%S"
+    return lo.strftime(fmt), hi.strftime(fmt)
+
+
+def _find_wcsc_alias(conn: sqlite3.Connection, event: str, started_at: str,
+                     initial_sfen: str | None, moves_blob: bytes):
+    """Return the opposite-form row for the same WCSC game, if unambiguous."""
+    bounds = _wcsc_time_bounds(started_at)
+    edition_match = _WCSC_EDITION_RE.match(event)
+    if bounds is None or edition_match is None:
+        return None
+    edition = edition_match.group(1).lower()
+    incoming_official = bool(_WCSC_OFFICIAL_FILE_RE.match(event))
+    rows = conn.execute(
+        "SELECT game_id, event, started_at, black_name, white_name, "
+        "       result, end_reason "
+        "FROM games "
+        "WHERE source='wcsc' AND started_at BETWEEN ? AND ? "
+        "  AND COALESCE(initial_sfen, '') = ? AND moves = ?",
+        (bounds[0], bounds[1], initial_sfen or "", moves_blob)).fetchall()
+    candidates = []
+    for row in rows:
+        other_edition = _WCSC_EDITION_RE.match(row[1])
+        if other_edition is None or other_edition.group(1).lower() != edition:
+            continue
+        # 公式アーカイブ名とライブ観戦名の間だけを統合する。
+        # 同形式の複数局は、全指し手が偶然同じでも別局の可能性がある。
+        if bool(_WCSC_OFFICIAL_FILE_RE.match(row[1])) == incoming_official:
+            continue
+        candidates.append(row)
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        log.warning("ambiguous WCSC alias, kept separately: %s", event)
+    return None
+
+
+def _replace_game_sort_key(conn: sqlite3.Connection, game_id: int,
+                           keys: list[int], old_sort_key: int,
+                           new_sort_key: int) -> None:
+    """Change one game's indexed time without scanning position_games."""
+    if old_sort_key == new_sort_key:
+        return
+    conn.executemany(
+        "UPDATE position_games SET sort_key = ? "
+        "WHERE position_key = ? AND sort_key = ? AND game_id = ? AND ply = ?",
+        [(new_sort_key, key, old_sort_key, game_id, ply)
+         for ply, key in enumerate(keys)])
+
+
+def _merge_wcsc_alias(conn: sqlite3.Connection, event: str, rec,
+                      moves_blob: bytes, analysis_blobs,
+                      touched_keys: set) -> int | None:
+    """Merge official/live representations while retaining their best metadata.
+
+    Identity is deliberately strict: same WCSC edition, opposite filename
+    forms, start times within two seconds, identical initial position and
+    identical complete move sequence.  The live representation supplies the
+    viewer event id and explicit server result; the official archive supplies
+    human-readable player names.  No position row is inserted or deleted.
+    """
+    existing = _find_wcsc_alias(
+        conn, event, rec.start_time, rec.initial_sfen, moves_blob)
+    if existing is None:
+        return None
+    (game_id, old_event, old_started_at, old_black, old_white,
+     old_result, old_reason) = existing
+    incoming_official = bool(_WCSC_OFFICIAL_FILE_RE.match(event))
+
+    if incoming_official:
+        # Existing row is the live representation.  Keep its URL-bearing id,
+        # explicit result/reason and server timestamp; take display names from
+        # the official archive.
+        new_event = old_event
+        new_started_at = old_started_at
+        new_black = rec.black_name or old_black
+        new_white = rec.white_name or old_white
+        new_result = old_result
+        new_reason = old_reason
+    else:
+        # Existing row is the official representation.  Upgrade it in place so
+        # source_files and every position row retain the same game_id.
+        new_event = event
+        new_started_at = rec.start_time
+        new_black = old_black or rec.black_name
+        new_white = old_white or rec.white_name
+        new_result = rec.result
+        new_reason = rec.end_reason
+
+    collision = conn.execute(
+        "SELECT game_id FROM games WHERE event = ? AND game_id != ?",
+        (new_event, game_id)).fetchone()
+    if collision is not None:
+        log.warning("WCSC alias event already belongs to another row: %s",
+                    new_event)
+        return None
+
+    conn.execute(
+        "UPDATE games SET event=?, started_at=?, black_name=?, white_name=?, "
+        "result=?, end_reason=? WHERE game_id=?",
+        (new_event, new_started_at, new_black, new_white,
+         new_result, new_reason, game_id))
+    _replace_game_sort_key(
+        conn, game_id, rec.sfen_keys, date_sort_key(old_started_at),
+        date_sort_key(new_started_at))
+    if old_result != new_result:
+        touched_keys.update(rec.sfen_keys)
+
+    # Live analysis is preferred when both forms contain it.  If only the
+    # official file has analysis, retain it instead of discarding useful data.
+    if analysis_blobs is not None:
+        has_existing = conn.execute(
+            "SELECT 1 FROM game_analysis WHERE game_id = ?", (game_id,)
+        ).fetchone() is not None
+        if not incoming_official or not has_existing:
+            conn.execute("INSERT OR REPLACE INTO game_analysis VALUES (?,?,?)",
+                         (game_id, analysis_blobs[0], analysis_blobs[1]))
+    return game_id
+
+
 def _store_record(conn: sqlite3.Connection, path: Path, rec,
                   touched_keys: set, stats: IngestStats,
                   pv_max_moves: int):
@@ -432,6 +571,18 @@ def _store_record(conn: sqlite3.Connection, path: Path, rec,
         if not event.endswith(suffix):
             event += suffix
 
+    # WCSC33以降は、同じ対局に「公式棋譜集のハイフン名」と
+    # 「観戦ページ用の日時入り名」がある。event だけでは別局になるため、
+    # 強い同一性条件で既存行と統合する。ライブ版の event と終局情報を
+    # 残すことでURLと反則側の明示情報を保ち、公式版の表示名を使う。
+    if source == "wcsc":
+        merged = _merge_wcsc_alias(
+            conn, event, rec, moves_blob, analysis_blobs, touched_keys)
+        if merged is not None:
+            stats.duplicates += 1
+            log.info("same WCSC game, metadata merged: %s", path.name)
+            return "duplicate", "same WCSC game; metadata merged", merged
+
     # --- ここから DB 書き込み (以降は例外を投げ得る計算を挟まない) ---
     cursor = conn.execute(
         "INSERT OR IGNORE INTO games "
@@ -444,7 +595,9 @@ def _store_record(conn: sqlite3.Connection, path: Path, rec,
     if cursor.rowcount == 0:
         stats.duplicates += 1
         log.info("duplicate, skipped: %s", path.name)
-        return "duplicate", None, None
+        row = conn.execute(
+            "SELECT game_id FROM games WHERE event = ?", (event,)).fetchone()
+        return "duplicate", None, row[0] if row else None
     game_id = cursor.lastrowid
 
     if analysis_blobs is not None:

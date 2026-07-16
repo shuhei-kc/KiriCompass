@@ -16,8 +16,10 @@ from kifudb.sfen_ingest import delete_batch
 
 class RegressionTests(unittest.TestCase):
     def test_wcsc_official_archive_filename_is_recognized(self) -> None:
-        self.assertEqual(
-            detect_source("WCSC36-U7-nshogi-478shogi"), "wcsc")
+        for edition in range(33, 37):
+            self.assertEqual(
+                detect_source(f"WCSC{edition}-U7-nshogi-478shogi"),
+                "wcsc")
         self.assertEqual(
             detect_source("WCSC36-U1-ponkotsu-test-478shogi"), "wcsc")
         for private_name in (
@@ -52,6 +54,104 @@ class RegressionTests(unittest.TestCase):
                 conn.close()
             self.assertEqual((event, source), (stem, "wcsc"))
             self.assertIsNone(game_url(source, event))
+
+    def test_wcsc_official_and_live_records_merge_in_either_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            official_dir = root / "official"
+            live_dir = root / "live"
+            official_dir.mkdir()
+            live_dir.mkdir()
+            official_stem = "WCSC36-U7-nshogi-478shogi"
+            live_stem = (
+                "WCSC36+U7_1-900-5F+nshogi+478shogi+20260504160000")
+            official_text = (
+                "V2.2\nN+ねえ将棋\nN-四七八将棋\n"
+                "$EVENT:第36回世界コンピュータ将棋選手権二次予選7回戦\n"
+                "$START_TIME:2026/05/04 16:00:01\n"
+                "PI\n+\n+7776FU\n%ILLEGAL_MOVE\n")
+            live_text = (
+                f"V2.2\nN+nshogi\nN-478shogi\n$EVENT:{live_stem}\n"
+                "$START_TIME:2026/05/04 16:00:00\n"
+                "PI\n+\n+7776FU\n%-ILLEGAL_ACTION\n")
+            (official_dir / f"{official_stem}.csa").write_bytes(
+                official_text.encode("cp932"))
+            (live_dir / f"{live_stem}.csa").write_text(
+                live_text, encoding="utf-8")
+
+            snapshots = []
+            for index, folders in enumerate(
+                    ((official_dir, live_dir), (live_dir, official_dir))):
+                db_path = root / f"order-{index}.db"
+                first = ingest_folder(db_path, folders[0])
+                second = ingest_folder(db_path, folders[1])
+                self.assertEqual((first.added, first.errors), (1, 0))
+                self.assertEqual(
+                    (second.added, second.duplicates, second.errors),
+                    (0, 1, 0))
+                conn = open_for_write(db_path)
+                try:
+                    row = conn.execute(
+                        "SELECT event, source, started_at, black_name, "
+                        "white_name, result, end_reason FROM games"
+                    ).fetchone()
+                    position_count = conn.execute(
+                        "SELECT COUNT(*) FROM position_games").fetchone()[0]
+                    ledger_ids = conn.execute(
+                        "SELECT COUNT(DISTINCT game_id), COUNT(*) "
+                        "FROM source_files WHERE game_id IS NOT NULL"
+                    ).fetchone()
+                finally:
+                    conn.close()
+                self.assertEqual(position_count, 2)
+                self.assertEqual(ledger_ids, (1, 2))
+                self.assertIsNotNone(game_url(row[1], row[0], row[2]))
+                snapshots.append(row)
+                repeat_first = ingest_folder(db_path, folders[0])
+                repeat_second = ingest_folder(db_path, folders[1])
+                self.assertEqual(
+                    (repeat_first.skipped_unchanged,
+                     repeat_second.skipped_unchanged), (1, 1))
+
+            expected = (live_stem, "wcsc", "2026-05-04 16:00:00",
+                        "ねえ将棋", "四七八将棋", 1, "illegal_action")
+            self.assertEqual(snapshots, [expected, expected])
+
+    def test_wcsc_distinct_replay_is_not_merged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            official_dir = root / "official"
+            live_dir = root / "live"
+            official_dir.mkdir()
+            live_dir.mkdir()
+            official = (
+                "V2.2\nN+257\nN-Kanade\n"
+                "$EVENT:第35回世界コンピュータ将棋選手権一次予選2回戦\n"
+                "$START_TIME:2025/05/03 11:22:06\n"
+                "PI\n+\n+7776FU\n%TORYO\n")
+            live_event = (
+                "WCSC35+L2_45_2-900-5F+nigonana+Kanade+20250503113118")
+            live = (
+                f"V2.2\nN+nigonana\nN-Kanade\n$EVENT:{live_event}\n"
+                "$START_TIME:2025/05/03 11:31:18\n"
+                "PI\n+\n+2726FU\n%TORYO\n")
+            (official_dir / "WCSC35-L2-nigonana-Kanade.csa").write_bytes(
+                official.encode("cp932"))
+            (live_dir / f"{live_event}.csa").write_text(
+                live, encoding="utf-8")
+            db_path = root / "test.db"
+
+            ingest_folder(db_path, official_dir)
+            ingest_folder(db_path, live_dir)
+            conn = open_for_write(db_path)
+            try:
+                rows = conn.execute(
+                    "SELECT event, source FROM games ORDER BY event").fetchall()
+            finally:
+                conn.close()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(sum(game_url(source, event) is not None
+                                 for event, source in rows), 1)
 
     def test_sfen_batch_delete_treats_underscore_as_literal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
