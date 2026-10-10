@@ -425,7 +425,7 @@ class PrecedentReader:
         return out
 
     def precedents_page(self, sfen: str, limit: int = DEFAULT_PAGE_SIZE,
-                        before: tuple[int, int] | None = None,
+                        before: tuple[int, int, int] | None = None,
                         sources: "set[str] | None" = None,
                         start_rank: int = 0,
                         name_query: str | None = None) -> "list[Precedent]":
@@ -436,8 +436,9 @@ class PrecedentReader:
         with no sort step — the first (cold-cache) query on a position with
         a million precedents costs the same as any other.
 
-        `before` = (sort_key, game_id) of the last row already shown
-        (keyset pagination; both values are on the returned Precedent).
+        `before` = (sort_key, game_id, ply) of the last row already shown
+        (keyset pagination; all values are on the returned Precedent).
+        ply distinguishes repeated visits to a position within one game.
 
         `sources`: None で全出典。集合を渡すと出典で絞り込む。絞り込みは
         出典→game_id 連続区間の表 (_source_intervals) を介して position_games
@@ -455,9 +456,8 @@ class PrecedentReader:
         key = position_key_from_sfen(normalize_sfen_main(sfen))
         condition, params = "", [key]
         if before is not None:
-            condition = ("AND (pg.sort_key < ? OR "
-                         "(pg.sort_key = ? AND pg.game_id < ?)) ")
-            params += [before[0], before[0], before[1]]
+            condition = "AND (pg.sort_key, pg.game_id, pg.ply) < (?, ?, ?) "
+            params += list(before)
         if name_query:
             name_sql, name_params = _name_query_condition(name_query)
             condition += name_sql
@@ -493,7 +493,7 @@ class PrecedentReader:
                 "       pg.sort_key "
                 "FROM position_games pg JOIN games g USING (game_id) "
                 f"WHERE pg.position_key = ? {condition} "
-                "ORDER BY pg.sort_key DESC, pg.game_id DESC "
+                "ORDER BY pg.sort_key DESC, pg.game_id DESC, pg.ply DESC "
                 "LIMIT ?", params + [limit]).fetchall()
         return [
             Precedent(game_id=r[0], event=r[1], source=r[2],

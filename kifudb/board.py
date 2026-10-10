@@ -407,7 +407,9 @@ def position_key_from_sfen(sfen_main: str) -> int:
 def normalize_sfen_main(sfen: str) -> str:
     """Drop the move counter and normalize whitespace of a user-supplied sfen."""
     parts = sfen.split()
-    if parts and parts[0] in ("position", "sfen"):
+    if parts and parts[0] == "position":
+        parts = parts[1:]
+    if parts and parts[0] == "sfen":
         parts = parts[1:]
     if parts == ["startpos"] or not parts:
         return f"{HIRATE_BOARD_SFEN} b -"
@@ -473,11 +475,34 @@ def move16_to_kanji(code: int, pos: Position | None = None) -> str:
     return f"{mark}{dest}{piece}{promo}({frm // 9 + 1}{frm % 9 + 1})"
 
 
-def apply_move16(pos: Position, code: int) -> None:
-    """Apply a 16-bit move code to a position (no legality check)."""
+def apply_move16(pos: Position, code: int, *, validate: bool = False) -> None:
+    """Apply a move, optionally checking piece ownership, drops and promotion.
+
+    Validation is for untrusted USI input. It matches the structural checks
+    of push_csa; movement geometry, check and pawn-drop mate are not checked.
+    Stored records keep the permissive replay path, including illegal endings.
+    """
     to_sq = code & 0x7F
     frm = (code >> 7) & 0x7F
     color = pos.turn
+    if validate:
+        if not 0 <= code < 0x8000 or to_sq > 80 or frm > 87:
+            raise ValueError(f"invalid move code: {code}")
+        if frm >= 81:
+            if code & (1 << 14):
+                raise ValueError("cannot promote a dropped piece")
+            pos.push_csa(color, -1, to_sq, frm - 81)
+        else:
+            moving = pos.board[frm]
+            if moving is None or moving[0] != color:
+                raise ValueError(f"no piece of color {color} on square {frm}")
+            ptype = moving[1]
+            if code & (1 << 14):
+                if ptype not in _PROMOTABLE:
+                    raise ValueError(f"cannot promote piece: {ptype}")
+                ptype = {KA: UM, HI: RY}.get(ptype, ptype + 8)
+            pos.push_csa(color, frm, to_sq, ptype)
+        return
     if pos.board[to_sq] is not None:
         pos.hands[color][unpromote(pos.board[to_sq][1])] += 1
     if frm >= 81:

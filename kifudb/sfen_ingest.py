@@ -1,8 +1,8 @@
 """.sfen 連続対局 (水匠定跡生成の出力) の取り込みとバッチ管理。
 
 1ファイル = 1バッチ (連続対局のひとまとまり)。各行が1局で、
-「(startpos | sfen <sfen>) moves <usi...> <resign|rep_draw>」の形式。
-勝敗は resign の手数パリティで判定し、rep_draw は千日手引き分け。
+「(startpos | sfen <sfen>) moves <usi...> <resign|rep_draw|max_moves>」の形式。
+resign は終局時の手番側の負け。rep_draw / max_moves は引き分け。
 それ以外の終端トークンは警告してその行をスキップする。
 
 設計 (前例DBとの関係):
@@ -31,14 +31,16 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .board import Position, apply_move16, normalize_sfen_main, usi_to_move16
+from .board import BLACK, Position, apply_move16, normalize_sfen_main, usi_to_move16
 from .db import open_for_write, open_read_only
 from .ingest import _refresh_stats, date_sort_key
 
 RESULT_DRAW, RESULT_BLACK, RESULT_WHITE = 0, 1, 2
 
 _STEM_DATE_RE = re.compile(r"(\d{14})")
-_TERMINALS = {"resign", "rep_draw"}
+_TERMINALS = {"resign", "rep_draw", "max_moves"}
+# 旧台帳は版番号なし (=1)。再読込時に旧版で飛ばした max_moves や勝敗を再評価する。
+_IMPORT_VERSION = 2
 TASK_SUFFIX = "#課題局面"          # 擬似対局のevent接尾辞 (連番の代わりの共通文言)
 
 
@@ -52,9 +54,15 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _batch_event_pattern(stem: str) -> str:
-    """Return a literal LIKE pattern for every event in one .sfen batch."""
-    return f"{_escape_like(stem)}#%"
+def _batch_game_condition(stem: str) -> tuple[str, list]:
+    """Match only this batch's generated events, even if a name contains '#'."""
+    prefix = f"{stem}#L"
+    return (
+        "source = 'sfen' AND (event = ? OR "
+        "(substr(event, 1, ?) = ? AND length(event) >= ? "
+        "AND substr(event, ?) NOT GLOB '*[^0-9]*'))",
+        [f"{stem}{TASK_SUFFIX}", len(prefix), prefix,
+         len(prefix) + 5, len(prefix) + 1])
 
 
 @dataclass
@@ -84,7 +92,7 @@ class SfenIngestResult:
     skipped: list[str] = field(default_factory=list)
     conflict: bool = False
     unchanged: bool = False
-    rebuilt: bool = False          # 追記で課題局面が動き、バッチを再構築した
+    rebuilt: bool = False          # 取り込み仕様の更新や課題局面の変更で再構築した
     prefix_len: int = 0
     error: str = ""                # 取り込みを拒否した理由 (同名別内容など)
 
@@ -97,7 +105,7 @@ class SfenIngestResult:
             return "変更なし"
         parts = []
         if self.rebuilt:
-            parts.append("課題局面の位置が変わったため再構築")
+            parts.append("バッチを再構築")
         parts.append(f"追加 {self.added}局")
         if self.prefix_len:
             parts.append(f"課題局面 {self.prefix_len}手目")
@@ -131,10 +139,17 @@ def _parse_line(raw: bytes, lineno: int) -> ParsedGame | str:
     if not sep:
         return f"{lineno}行目: 'moves' 区切りがありません"
     head = head.strip()
+    first_turn = BLACK
     if head == "startpos":
         initial = None
     elif head.startswith("sfen "):
-        initial = normalize_sfen_main(head[5:].strip())
+        pos = Position()
+        try:
+            pos.set_sfen(normalize_sfen_main(head[5:].strip()))
+        except ValueError as exc:
+            return f"{lineno}行目: 初期局面が不正です ({exc})"
+        initial = pos.sfen_key_string()
+        first_turn = pos.turn
     else:
         return f"{lineno}行目: 初期局面の指定が不正です ({head[:20]})"
     tokens = tail.split()
@@ -143,14 +158,17 @@ def _parse_line(raw: bytes, lineno: int) -> ParsedGame | str:
     terminal = tokens[-1]
     if terminal not in _TERMINALS:
         return (f"{lineno}行目: 終局トークンが不正です ({terminal!r}) "
-                "- resign/rep_draw のみ対応")
+                "- resign/rep_draw/max_moves のみ対応")
     usi_moves = tokens[:-1]
     if not usi_moves:
         return f"{lineno}行目: 指し手がありません"
     if terminal == "rep_draw":
         result, reason = RESULT_DRAW, "sennichite"
-    else:  # resign: 最後に指した側の勝ち (奇数手なら先手)
-        result = RESULT_BLACK if len(usi_moves) % 2 == 1 else RESULT_WHITE
+    elif terminal == "max_moves":
+        result, reason = RESULT_DRAW, "max_moves"
+    else:  # resign: 終局時の手番側が投了 (初期局面が後手番の場合も含む)
+        loser = (first_turn + len(usi_moves)) % 2
+        result = RESULT_WHITE if loser == BLACK else RESULT_BLACK
         reason = "toryo"
     return ParsedGame(lineno, initial, usi_moves, result, reason)
 
@@ -200,7 +218,7 @@ def _replay(initial_sfen: str | None, usi_moves: list[str]):
         code = usi_to_move16(usi)
         if code is None:
             raise ValueError(f"不正なUSI手: {usi}")
-        apply_move16(pos, code)
+        apply_move16(pos, code, validate=True)
         moves16.append(code)
         keys.append(pos.position_key())
     return moves16, keys
@@ -328,15 +346,17 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
                 result.conflict = True
                 say(f"[{path.stem}] {result.summary()}")
                 return result
-            if len(lines) == known:
+            upgrade = detail.get("import_version", 1) < _IMPORT_VERSION
+            if len(lines) == known and not upgrade:
                 result.unchanged = True
+                conn.commit()  # ファイル移動時の台帳パス更新も保存する
                 return result
             label = detail.get("label") or path.stem
             date_str = detail.get("date", "")
-            old_games, _ = _parse_lines(lines[:known])  # 警告は初回に報告済み
+            old_games, old_skipped = _parse_lines(lines[:known])
             new_games, result.skipped = _parse_lines(lines[known:], known + 1)
             prefix_len = _common_prefix_len(old_games + new_games)
-            if prefix_len != detail.get("prefix", 0):
+            if upgrade or prefix_len != detail.get("prefix", 0):
                 # 追記で課題局面の位置が変わった: より手前の分岐が判明したか、
                 # 初回が1局のみで接頭辞を検出できていなかったケース。既読部分
                 # はハッシュ検証済みなので、ファイルを正としてバッチ全体を
@@ -344,6 +364,9 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
                 _delete_batch_rows(conn, path.stem)
                 result.rebuilt = True
                 new_games = old_games + new_games
+                result.skipped = old_skipped + result.skipped
+                if upgrade:
+                    say(f"[{path.stem}] 取り込み仕様の更新により既読行を再取り込み")
             else:
                 fresh = False
         else:
@@ -359,13 +382,18 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
             # 対局者名は「<ラベル> (共通)」— 課題局面で終局する棋譜だと
             # 一覧で分かるようにする。
             rep = new_games[0]
-            moves16, keys16 = _replay(rep.initial_sfen,
-                                      rep.usi_moves[:prefix_len])
-            task_touched: set[int] = set()
-            _insert_game(conn, f"{path.stem}{TASK_SUFFIX}", date_str,
-                         f"{label} (共通)", rep.initial_sfen, moves16, keys16,
-                         0, None, "task", task_touched)
-            _refresh_stats(conn, task_touched)
+            try:
+                moves16, keys16 = _replay(rep.initial_sfen,
+                                          rep.usi_moves[:prefix_len])
+            except (ValueError, KeyError, TypeError):
+                # 全行に共通する不正手も、下の行単位処理で警告・スキップする。
+                prefix_len = 0
+            else:
+                task_touched: set[int] = set()
+                _insert_game(conn, f"{path.stem}{TASK_SUFFIX}", date_str,
+                             f"{label} (共通)", rep.initial_sfen, moves16, keys16,
+                             0, None, "task", task_touched)
+                _refresh_stats(conn, task_touched)
 
         touched = set()
         for game in new_games:
@@ -389,6 +417,7 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
             (str(path), st.st_size, st.st_mtime_ns, "ok", json.dumps({
                 "type": "sfen", "lines": len(lines),
                 "sha256": _lines_hash(lines), "prefix": prefix_len,
+                "import_version": _IMPORT_VERSION,
                 "label": label, "date": date_str}, ensure_ascii=False)))
         conn.commit()
         try:
@@ -418,10 +447,11 @@ def list_batches(db_path: str | Path) -> list[dict]:
             if detail.get("type") != "sfen":
                 continue
             stem = Path(path).stem
+            condition, params = _batch_game_condition(stem)
             games = conn.execute(
-                "SELECT COUNT(*) FROM games WHERE event LIKE ? ESCAPE '\\' "
+                f"SELECT COUNT(*) FROM games WHERE {condition} "
                 "AND event != ?",
-                (_batch_event_pattern(stem), f"{stem}{TASK_SUFFIX}")).fetchone()[0]
+                params + [f"{stem}{TASK_SUFFIX}"]).fetchone()[0]
             out.append({"path": path, "stem": stem, "status": status,
                         "label": detail.get("label", ""),
                         "date": (detail.get("date") or "")[:10],
@@ -436,9 +466,10 @@ def _delete_batch_rows(conn: sqlite3.Connection, stem: str) -> int:
 
     position_games は各対局の moves を再生して完全な主キーで狙い撃ちする
     (日付バックフィルと同じ手法)。commit は呼び出し側が行う。"""
+    condition, params = _batch_game_condition(stem)
     games = conn.execute(
         "SELECT game_id, started_at, initial_sfen, moves FROM games "
-        "WHERE event LIKE ? ESCAPE '\\'", (_batch_event_pattern(stem),)).fetchall()
+        f"WHERE {condition}", params).fetchall()
     touched: set[int] = set()
     for game_id, started_at, initial_sfen, moves_blob in games:
         moves = array.array("H")
@@ -459,8 +490,7 @@ def _delete_batch_rows(conn: sqlite3.Connection, stem: str) -> int:
             [(key, sort_key, game_id, ply) for ply, key in enumerate(keys)])
         touched.update(keys)
     _refresh_stats(conn, touched)
-    conn.execute("DELETE FROM games WHERE event LIKE ? ESCAPE '\\'",
-                 (_batch_event_pattern(stem),))
+    conn.execute(f"DELETE FROM games WHERE {condition}", params)
     return len(games)
 
 

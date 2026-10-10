@@ -1510,7 +1510,7 @@ class PrecedentViewer:
         if self._search_running or not self.precedents:
             return
         last = self.precedents[-1]
-        before = (last.sort_key, last.game_id)
+        before = (last.sort_key, last.game_id, last.ply)
         start_rank = last.rank
         db_path = norm_db_path(self.db_var.get())
         sfen = self.sfen_var.get().strip()

@@ -41,7 +41,7 @@ def make_launcher(target: Path, args: argparse.Namespace) -> None:
     # 素のDB名 ('csa.db') は data/ に解決してから埋め込む。生成時のカレント
     # ディレクトリでランチャーの中身が変わってはいけない (resolve_db_path)。
     common_args = (
-        f' --db "{resolve_db_path(args.db)}"'
+        f' --db "{resolve_db_path(args.db).resolve()}"'
         f' --sync-file "{Path(args.sync_file).resolve()}"'
         f" --multipv {args.multipv} --pv-depth {args.pv_depth}"
         f" --encoding {args.encoding}"
