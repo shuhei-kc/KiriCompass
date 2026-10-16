@@ -6,6 +6,8 @@
 リアルタイムに閲覧できる。依存は Python 3.10+ の標準ライブラリのみ。
 設計の詳細は [DESIGN.md](DESIGN.md)。
 
+[web版KiriCompass](https://478shogi.com/kiricompass/) — 導入不要・ShogiHomeベース
+
 導入用記事　https://note.com/478_shogi/n/n89d157559b65
 
 ## 配布DB
