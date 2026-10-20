@@ -259,12 +259,31 @@ class IngestStats:
         self.empty = 0
         self.duplicates = 0
         self.errors = 0
+        self.error_files: list[str] = []   # "<ファイル名> (<理由>)"、先頭のみ保持
+
+    def record_error(self, path: Path, message: str) -> None:
+        self.errors += 1
+        log.warning("error: %s (%s)", path.name, message)
+        if len(self.error_files) < 100:
+            self.error_files.append(f"{path.name} ({message})")
 
     def summary(self) -> str:
         return (f"scanned={self.scanned} added={self.added} "
                 f"unchanged={self.skipped_unchanged} unfinished={self.unfinished} "
                 f"aborted={self.empty} duplicates={self.duplicates} "
                 f"errors={self.errors}")
+
+    def summary_ja(self) -> str:
+        """GUI向けの要約。0件の項目は省く。"""
+        parts = [f"確認 {self.scanned}件", f"追加 {self.added}局"]
+        for count, label in ((self.skipped_unchanged, "登録済み"),
+                             (self.unfinished, "未終局"),
+                             (self.empty, "不成立"),
+                             (self.duplicates, "重複"),
+                             (self.errors, "エラー")):
+            if count:
+                parts.append(f"{label} {count}件")
+        return " / ".join(parts)
 
 
 def ingest_folder(db_path: str | Path, folder: str | Path,
@@ -307,6 +326,8 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
 
     for index, path in enumerate(files, 1):
         stats.scanned += 1
+        if progress and index % 100 == 0:
+            progress(index, total)
         st = path.stat()
         key = str(path)
         if ledger.get(key) == (st.st_size, st.st_mtime_ns):
@@ -326,8 +347,6 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
             _refresh_stats(conn, touched_keys)
             conn.commit()
             in_batch = 0
-            if progress:
-                progress(index, total)
             log.info("progress %d/%d (%s)", index, total, stats.summary())
 
     _refresh_stats(conn, touched_keys)
@@ -358,12 +377,10 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
         else:
             rec = csa.parse_csa(csa.decode_bytes(raw), source_name=path.name)
     except (csa.CsaParseError, OSError) as exc:
-        stats.errors += 1
-        log.warning("error: %s (%s)", path.name, exc)
+        stats.record_error(path, str(exc))
         return "error", str(exc), None
     except Exception as exc:  # noqa: BLE001 - パース段階の想定外例外を隔離
-        stats.errors += 1
-        log.warning("error: %s (%s: %s)", path.name, type(exc).__name__, exc)
+        stats.record_error(path, f"{type(exc).__name__}: {exc}")
         return "error", f"{type(exc).__name__}: {exc}", None
 
     # パース後のDB書き込みも、想定外の例外はこの1ファイルだけ error にして
@@ -374,8 +391,7 @@ def _ingest_file(conn: sqlite3.Connection, path: Path,
     try:
         return _store_record(conn, path, rec, touched_keys, stats, pv_max_moves)
     except Exception as exc:  # noqa: BLE001 - 1ファイルの不良で全体を止めない
-        stats.errors += 1
-        log.warning("error: %s (%s: %s)", path.name, type(exc).__name__, exc)
+        stats.record_error(path, f"{type(exc).__name__}: {exc}")
         return "error", f"{type(exc).__name__}: {exc}", None
 
 

@@ -201,6 +201,10 @@ class RegressionTests(unittest.TestCase):
 
             stats = ingest_folder(db_path, folder)
             self.assertEqual((stats.added, stats.errors), (1, 1))
+            self.assertEqual(len(stats.error_files), 1)
+            self.assertTrue(stats.error_files[0].startswith("bad.csa ("))
+            self.assertEqual(stats.summary_ja(),
+                             "確認 2件 / 追加 1局 / エラー 1件")
             conn = open_for_write(db_path)
             try:
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM games").fetchone()[0], 1)

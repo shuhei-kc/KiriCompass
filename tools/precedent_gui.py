@@ -22,6 +22,7 @@ import json
 import logging
 import logging.handlers
 import queue
+import re
 import sys
 import threading
 import time
@@ -220,6 +221,32 @@ def save_interval_sidecar(db_path: str, intervals, max_gid: int,
         pass  # 保存失敗は次回再計算するだけ
 RESULT_JA = {1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
 WINNER_JA = {1: "先", 2: "後"}  # それ以外 (引分・結果なし) は "-"
+SFEN_STATUS_JA = {"ok": "OK", "conflict": "競合"}
+
+_DATE_INPUT_RE = re.compile(
+    r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})"
+    r"(?:[ T]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$")
+
+
+def normalize_date_input(text: str) -> str | None:
+    """日付入力を 'YYYY-MM-DD HH:MM:SS' に揃える。空欄は ''、不正は None。
+
+    時刻を省いた '2026-10-20' もそのまま保存すると並べ替えキーが作れず
+    「日付不明」扱い (前例一覧の最後尾) になるため、00:00:00 を補う。"""
+    text = text.strip()
+    if not text:
+        return ""
+    m = _DATE_INPUT_RE.match(text)
+    if not m:
+        return None
+    y, mo, d, h, mi, sec = m.groups()
+    try:
+        value = datetime(int(y), int(mo), int(d), int(h or 0), int(mi or 0),
+                         int(sec or 0))
+    except ValueError:
+        return None
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
 
 # 「Xでポスト」は隠し機能: 起動時に runtime/post_template.txt が存在する
 # 場合にのみボタンが現れる (作者の個人用途。有効化したい人だけが自分で
@@ -274,17 +301,27 @@ class PrecedentViewer:
         # 直列化し、決して同時にDBへ書かない。読み取り (検索) とはWALで共存。
         self._db_jobs: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self._db_job_running: str | None = None
+        self._db_job_progress = ""       # 実行中ジョブの進捗 (ステータス表示用)
         self._floodgate_queued = False   # floodgateジョブの重複投入防止
         # sfen混入ガードの結果キャッシュ: path -> (mtime_ns, has_sfen)。
         # 該当なしのDBでは判定がgames全走査になるため、毎回は走らせない。
         self._sfen_check_cache: dict[str, tuple[int, bool]] = {}
         self._update_win: tk.Toplevel | None = None
         self._update_log_lines: list[str] = []  # ウィンドウ再表示用の履歴
+        # 更新ログはワーカーから大量に来ることがあるため、まとめて画面へ流す
+        self._log_pending: list[str] = []
+        self._log_lock = threading.Lock()
+        self._log_flush_scheduled = False
+        self._sfen_list_token = 0        # バッチ一覧の非同期読み込みの世代
+        self._sfen_preparing = False     # .sfen追加の事前確認 (読み込み) 中
+        self._reselect_game_id: int | None = None  # 再表示後に選択し直す前例
+        self._sfen_view_hint_shown = False
         self._name_db_query: str | None = None  # DB側に適用中の名前フィルタ
 
         self._setup_fonts()
         self._build_widgets()
         self._load_config()
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
         if len(sys.argv) > 1:
             self.db_var.set(norm_db_path(sys.argv[1]))
         self._prime_source_intervals()  # 起動直後から先読みを始める
@@ -609,6 +646,7 @@ class PrecedentViewer:
 
     def _show_error(self, message: str, quiet: bool = False) -> None:
         self._search_running = False
+        self._reselect_game_id = None
         self.search_button.config(state=tk.NORMAL)
         if quiet:  # 追従など自動起点の検索はダイアログを出さない
             self.status_var.set(f"検索エラー: {message}")
@@ -653,6 +691,12 @@ class PrecedentViewer:
         self.status_var.set(
             f"前例 {total}局 / 候補手 {len(candidates)}種 / "
             f"表示 {len(self.precedents)}件 ({elapsed:.1f}ms)")
+        reselect, self._reselect_game_id = self._reselect_game_id, None
+        for index, p in enumerate(self.precedents):
+            if reselect is not None and p.game_id == reselect:
+                self.prec_tv.selection_set(str(index))
+                self.prec_tv.see(str(index))
+                break
         self._refetch_if_filter_changed(sources)
 
     def _prime_source_intervals(self) -> None:
@@ -730,6 +774,7 @@ class PrecedentViewer:
             if kind == "floodgate":
                 self._floodgate_queued = False
             self._db_job_running = kind
+            self._db_job_progress = ""
             self.root.after(0, self._set_update_status)
             try:
                 fn()
@@ -737,7 +782,29 @@ class PrecedentViewer:
                 self._ulog(f"[{kind}] 失敗: {exc}")
             finally:
                 self._db_job_running = None
+                self._db_job_progress = ""
                 self.root.after(0, self._set_update_status)
+
+    def _set_job_progress(self, text: str) -> None:
+        """実行中ジョブの進捗表示を更新する (どのスレッドからでも呼べる)。
+
+        ログには流さない: 進捗のたびにログ行を足すと肝心の結果が埋もれる。"""
+        self._db_job_progress = text
+        self.root.after(0, self._set_update_status)
+
+    def _on_close(self) -> None:
+        """DB更新中の終了は確認する (中断自体は安全だが、黙って捨てない)。"""
+        if self._db_job_running or not self._db_jobs.empty():
+            waiting = self._db_jobs.qsize()
+            if not messagebox.askyesno(
+                    "確認",
+                    f"DB更新中です ({self._db_job_running or '待機中'}"
+                    + (f"、ほか待機 {waiting}件" if waiting else "") + ")。\n"
+                    "今終了すると実行中の取り込みは中断され、その分はDBに"
+                    "反映されません (DBが壊れることはありません)。\n\n"
+                    "終了しますか？", parent=self._dialog_parent()):
+                return
+        self.root.destroy()
 
     def _update_db_switch_marks(self) -> None:
         """ビューアが開いているDBに対応する切替ボタンへ ● を付ける。"""
@@ -916,9 +983,10 @@ class PrecedentViewer:
             if not self._sfen_guard(db_path, "公開前例DB", quiet=quiet):
                 return
             self._ulog(f"[floodgate] 更新開始 ({label}, 過去{days}日分を照合)")
-            update_once(db_path, FLOODGATE_MIRROR, days=days,
-                        log_line=lambda m: self._ulog(f"[floodgate] {m}"))
-            self._after_db_update(db_path)
+            result = update_once(db_path, FLOODGATE_MIRROR, days=days,
+                                 log_line=lambda m: self._ulog(f"[floodgate] {m}"))
+            self._after_db_update(
+                db_path, changed=bool(result.ingest and result.ingest.added))
 
         self._db_jobs.put(("floodgate", job))
 
@@ -947,36 +1015,48 @@ class PrecedentViewer:
                     not self._sfen_guard(private_db, "プライベートDB"):
                 return
             self._ulog(f"[取り込み] 開始: {folder}")
+            self._set_job_progress("(ファイルを列挙中)")
             files = [p for p in Path(folder).rglob("*")
                      if p.suffix.lower() in KIFU_SUFFIXES and p.is_file()]
             n_public = sum(1 for p in files if is_public(p))
             n_private = len(files) - n_public
+            if not files:
+                self._ulog("[取り込み] 対象ファイルがありません "
+                           f"(対応形式: {' '.join(sorted(KIFU_SUFFIXES))})")
+                return
             self._ulog(f"[取り込み] 振り分け: 公開 {n_public} / "
                        f"プライベート {n_private}")
-            if n_public:
+            for count, db, role, keep in (
+                    (n_public, public_db, "公開DB", True),
+                    (n_private, private_db, "プライベートDB", False)):
+                if not count:
+                    continue
                 stats = ingest_folder(
-                    public_db, folder, file_filter=is_public,
-                    progress=lambda i, n: self._ulog(f"[取り込み 公開] {i}/{n}"))
-                self._ulog(f"[取り込み 公開DB] {stats.summary()}")
-                self._after_db_update(public_db)
-            if n_private:
-                stats = ingest_folder(
-                    private_db, folder,
-                    file_filter=lambda p: not is_public(p),
-                    progress=lambda i, n: self._ulog(
-                        f"[取り込み プライベート] {i}/{n}"))
-                self._ulog(f"[取り込み プライベートDB] {stats.summary()}")
-                self._after_db_update(private_db)
-            if not files:
-                self._ulog("[取り込み] 対象ファイルがありません")
+                    db, folder,
+                    file_filter=lambda p, keep=keep: is_public(p) == keep,
+                    progress=lambda i, n, role=role: self._set_job_progress(
+                        f"({role} {i}/{n}ファイル)"))
+                self._ulog(f"[取り込み {role}] {stats.summary_ja()}")
+                for item in stats.error_files[:10]:
+                    self._ulog(f"[取り込み {role}] エラー: {item}")
+                if stats.errors:
+                    more = stats.errors - min(len(stats.error_files), 10)
+                    self._ulog(f"[取り込み {role}] "
+                               + (f"ほか {more}件。" if more > 0 else "")
+                               + "読めなかったファイルは飛ばして続行しました"
+                                 f" (詳細: {LOG_FILE})")
+                self._after_db_update(db, changed=stats.added > 0)
 
         self._db_jobs.put(("フォルダ取り込み", job))
 
-    def _after_db_update(self, db_path: str) -> None:
+    def _after_db_update(self, db_path: str, changed: bool = True) -> None:
         """取り込み後の島表の差分更新 (workerスレッドで実行)。
 
         追加分 (旧max_gid以降) だけ走査して島表にマージするので、逐次更新の
-        たびに全走査へ戻らない。先読み前なら何もしない (次の絞り込みで計算)。"""
+        たびに全走査へ戻らない。先読み前なら何もしない (次の絞り込みで計算)。
+        changed なら、そのDBを表示中のビューアも再検索して結果を反映する。"""
+        if changed:
+            self.root.after(0, self._refresh_view_after_update, db_path)
         cached = self._interval_cache.get(db_path)
         if not cached:
             return
@@ -993,6 +1073,25 @@ class PrecedentViewer:
             reader = self._reader
             if reader is not None and reader.db_path == db_path:
                 reader.set_source_intervals(new_iv, new_mg)
+
+    def _refresh_view_after_update(self, db_path: str) -> None:
+        """表示中のDBが更新されたら、現在の局面を再検索して反映する。
+
+        取り込み後も表示が古いままだと「入っていない」と誤解されるため。
+        選択中の前例は再表示後も選び直す。対局者名フィルタの適用中は
+        (再検索で解除されてしまうので) 自動では行わず案内だけ出す。"""
+        if (norm_db_path(self.db_var.get()) != norm_db_path(db_path)
+                or self.query_position is None):
+            return
+        if self._name_db_query:
+            self.status_var.set("DBが更新されました。「検索」で最新の内容を表示します。")
+            return
+        if self._search_running:
+            self.root.after(500, self._refresh_view_after_update, db_path)
+            return
+        selected = self._selected_precedent()
+        self._reselect_game_id = selected.game_id if selected else None
+        self.search(quiet=True)
 
     # -- 起動時の新規棋譜チェック --------------------------------------------
 
@@ -1046,28 +1145,49 @@ class PrecedentViewer:
         self._enqueue_floodgate("再走査", days=days)
 
     def _set_update_status(self) -> None:
-        parts = []
+        text = ""
         if self._db_job_running:
-            parts.append(f"DB更新中: {self._db_job_running}")
-        self.update_status_var.set(" / ".join(parts))
+            text = f"DB更新中: {self._db_job_running}"
+            if self._db_job_progress:
+                text += f" {self._db_job_progress}"
+            waiting = self._db_jobs.qsize()
+            if waiting:
+                text += f" (待機 {waiting}件)"
+        self.update_status_var.set(text)
 
     def _ulog(self, message: str) -> None:
-        """更新ログ1行 (どのスレッドからでも呼べる)。"""
+        """更新ログ1行 (どのスレッドからでも呼べる)。
+
+        画面への反映はまとめて1回の after で行う。1行ごとに after を積むと、
+        警告が大量に出たときにイベントキューが溢れて画面が固まる。"""
         line = f"{datetime.now():%H:%M:%S} {message}"
         # 窓を閉じても・落ちても残るよう、ファイルにも常に書く
         logging.getLogger("kifudb.gui").info(message)
+        with self._log_lock:
+            self._log_pending.append(line)
+            if self._log_flush_scheduled:
+                return
+            self._log_flush_scheduled = True
+        self.root.after(50, self._flush_log)
 
-        def append():
-            self._update_log_lines.append(line)
-            del self._update_log_lines[:-500]
-            widget = getattr(self, "_update_log_text", None)
-            if widget is not None and widget.winfo_exists():
-                widget.config(state=tk.NORMAL)
-                widget.insert(tk.END, line + "\n")
-                widget.see(tk.END)
-                widget.config(state=tk.DISABLED)
-
-        self.root.after(0, append)
+    def _flush_log(self) -> None:
+        with self._log_lock:
+            lines, self._log_pending = self._log_pending, []
+            self._log_flush_scheduled = False
+        if not lines:
+            return
+        self._update_log_lines.extend(lines)
+        del self._update_log_lines[:-500]
+        widget = getattr(self, "_update_log_text", None)
+        if widget is not None and widget.winfo_exists():
+            widget.config(state=tk.NORMAL)
+            widget.insert(tk.END, "\n".join(lines) + "\n")
+            # 表示も履歴と同程度に保つ (巨大化するとWindowsで描画が重くなる)
+            excess = int(widget.index("end-1c").split(".")[0]) - 1000
+            if excess > 0:
+                widget.delete("1.0", f"{excess + 1}.0")
+            widget.see(tk.END)
+            widget.config(state=tk.DISABLED)
 
     # -- DB更新ウィンドウ ---------------------------------------------------
 
@@ -1077,7 +1197,7 @@ class PrecedentViewer:
             return
         win = tk.Toplevel(self.root)
         win.title("DB更新")
-        win.geometry(f"{self._px(700)}x{self._px(820)}")
+        win.geometry(f"{self._px(700)}x{self._px(880)}")
         self._update_win = win
 
         db_frame = ttk.LabelFrame(win, text="取り込み先", padding=8)
@@ -1188,12 +1308,22 @@ class PrecedentViewer:
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sfen_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._sfen_tree = tree
+        # 一覧の要約・読み込み状況 (ボタン行の右端。縦の余白を使わない)
+        self._sfen_list_status = tk.StringVar(value="")
+        ttk.Label(sfen_buttons, textvariable=self._sfen_list_status,
+                  foreground="gray").pack(side=tk.RIGHT)
         self._refresh_sfen_list()
 
         log_frame = ttk.LabelFrame(win, text="ログ", padding=4)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
+        # 最初に下端へ確保する: 画面が狭いと後から詰めた枠ほど削られるため、
+        # 取り込み結果を伝えるログではなく .sfen の一覧の方が縮むようにする
+        log_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True,
+                       padx=8, pady=(4, 8), before=db_frame)
+        # 実行中ジョブと進捗 (メイン画面の右下と同じ表示)
+        ttk.Label(log_frame, textvariable=self.update_status_var,
+                  foreground="#1a7f37").pack(side=tk.TOP, anchor=tk.W)
         text = tk.Text(log_frame, wrap=tk.NONE, state=tk.DISABLED,
-                       font=self.mono_font, height=8)
+                       font=self.mono_font, height=6)
         log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL,
                                    command=text.yview)
         text.configure(yscrollcommand=log_scroll.set)
@@ -1212,125 +1342,275 @@ class PrecedentViewer:
         return norm_db_path(self.sfen_db_var.get()) or str(DEFAULT_SFEN_DB)
 
     def _refresh_sfen_list(self) -> None:
+        """バッチ一覧を読み直す。DBの読み取りはバックグラウンドで行う。
+
+        大きな .sfen DB では一覧の集計に時間がかかることがあり、メイン
+        スレッドで読むと窓の表示・取り込み完了のたびに画面が固まる
+        (Windowsでは「応答なし」になる)。"""
         tree = getattr(self, "_sfen_tree", None)
         if tree is None or not tree.winfo_exists():
             return
-        tree.delete(*tree.get_children())
         db = self._sfen_db()
+        self._sfen_list_token += 1
+        token = self._sfen_list_token
         if not Path(db).is_file():
+            tree.delete(*tree.get_children())
+            self._sfen_list_status.set(
+                ".sfen DBはまだありません (最初の取り込みで作成されます)")
             return
-        try:
-            batches = list_batches(db)
-        except Exception:  # noqa: BLE001 - 対象DBが前例DB等でも落とさない
-            return
+        self._sfen_list_status.set("バッチ一覧を読み込み中...")
+
+        def task():
+            try:
+                batches, error = list_batches(db), None
+            except Exception as exc:  # noqa: BLE001 - 対象DBが前例DB等でも落とさない
+                batches, error = [], str(exc)
+            self.root.after(0, self._show_sfen_list, token, batches, error)
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _show_sfen_list(self, token: int, batches: list, error) -> None:
+        tree = getattr(self, "_sfen_tree", None)
+        if (token != self._sfen_list_token or tree is None
+                or not tree.winfo_exists()):
+            return  # より新しい読み込みが走っている / 窓が閉じた
+        selected = tree.selection()
+        tree.delete(*tree.get_children())
         for b in batches:
             tree.insert("", tk.END, iid=b["path"], values=(
                 b["stem"], b["label"], b["date"], b["games"],
-                b["prefix"] or "-", b["status"]))
-
-    def _guard_sfen_db(self) -> str | None:
-        """取り込み先が実対局の前例DBだったら警告する (誤爆防止)。"""
-        db = self._sfen_db()
-        if Path(db).is_file():
-            try:
-                conn = open_read_only(db)
-                try:
-                    mixed = conn.execute(
-                        "SELECT 1 FROM games WHERE source != 'sfen' LIMIT 1"
-                    ).fetchone()
-                finally:
-                    conn.close()
-            except Exception:  # noqa: BLE001
-                mixed = None
-            if mixed and not messagebox.askyesno(
-                    "確認",
-                    "このDBには実対局の前例が入っています。.sfen連続対局は専用DBに"
-                    "分けることを推奨します。\nそれでも取り込みますか？",
-                    parent=self._dialog_parent()):
-                return None
-        return db
+                b["prefix"] or "-",
+                SFEN_STATUS_JA.get(b["status"], b["status"])))
+        keep = [iid for iid in selected if tree.exists(iid)]
+        if keep:
+            tree.selection_set(keep)
+        if error:
+            self._sfen_list_status.set(f"バッチ一覧を読めませんでした: {error}")
+        elif batches:
+            conflicts = sum(1 for b in batches if b["status"] == "conflict")
+            self._sfen_list_status.set(
+                f"{len(batches)}バッチ / {sum(b['games'] for b in batches)}局"
+                + (f" / 競合 {conflicts}件" if conflicts else ""))
+        else:
+            self._sfen_list_status.set("登録済みのバッチはありません")
 
     def _add_sfen_files(self) -> None:
-        db = self._guard_sfen_db()
-        if db is None:
+        """選んだ .sfen を取り込む。新規バッチはプレビューで確認してから。
+
+        ファイルの読み込み・DBの確認 (混入チェック・既知バッチの照合) は
+        バックグラウンドで済ませ、終わってから確認ダイアログを出す。大きな
+        ファイルやDBでもボタンを押した直後に画面が固まらないようにする。"""
+        if self._sfen_preparing:
+            self._ulog("[.sfen] 前に選んだファイルを確認中です。少しお待ちください")
             return
         paths = filedialog.askopenfilenames(
             title=".sfen 連続対局ファイルを選択", parent=self._dialog_parent(),
             filetypes=[("sfen棋譜", "*.sfen"), ("All", "*")])
-        batches = list_batches(db) if Path(db).is_file() else []
-        for p in paths:
-            # パス一致だけでなくバッチ名一致も既知扱いにする (移動したファイルは
-            # ライブラリ側が台帳を付け替え、同名別内容なら拒否される)
-            stem = Path(p).stem
-            known = any(b["path"] == p or b["stem"] == stem for b in batches)
-            if known:
-                self._enqueue_sfen_ingest(p, None, None)  # 追記は尋ねず自動
-            else:
-                params = self._sfen_preview_dialog(p)
-                if params is not None:
-                    self._enqueue_sfen_ingest(p, *params)
+        if not paths:
+            return
+        db = self._sfen_db()
+        self._sfen_preparing = True
+        status = getattr(self, "_sfen_list_status", None)
 
-    def _sfen_preview_dialog(self, path: str):
-        """新規バッチの取り込み前プレビュー。(label, date) か None(スキップ)。"""
-        try:
-            scan = scan_file(path)
-        except OSError as exc:
-            messagebox.showerror("エラー", f"{path}: {exc}",
-                                 parent=self._dialog_parent())
-            return None
-        dialog = tk.Toplevel(self._dialog_parent())
+        def show(text: str) -> None:
+            if status is not None:
+                self.root.after(0, status.set, text)
+
+        def task():
+            mixed, scans, error = False, {}, None
+            try:
+                batches = []
+                if Path(db).is_file():
+                    show("取り込み先DBを確認中...")
+                    conn = open_read_only(db)
+                    try:
+                        mixed = conn.execute(
+                            "SELECT 1 FROM games WHERE source != 'sfen' LIMIT 1"
+                        ).fetchone() is not None
+                    finally:
+                        conn.close()
+                    batches = list_batches(db)
+                known_paths = {b["path"] for b in batches}
+                known_stems = {b["stem"] for b in batches}
+                for i, p in enumerate(paths, 1):
+                    # パス一致だけでなくバッチ名一致も既知扱いにする (移動した
+                    # ファイルはライブラリ側が台帳を付け替え、同名別内容なら拒否)
+                    if str(Path(p)) in known_paths or Path(p).stem in known_stems:
+                        scans[p] = None
+                        continue
+                    show(f"ファイルを読み込み中 ({i}/{len(paths)}): {Path(p).name}")
+                    try:
+                        scans[p] = scan_file(p)
+                    except OSError as exc:
+                        scans[p] = exc
+            except Exception as exc:  # noqa: BLE001 - 理由をそのまま提示する
+                error = exc
+            self.root.after(0, self._continue_add_sfen, db, paths, mixed,
+                            scans, error)
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _continue_add_sfen(self, db: str, paths, mixed: bool, scans: dict,
+                           error) -> None:
+        """_add_sfen_files の後半 (メインスレッド): 確認して投入する。"""
+        self._sfen_preparing = False
+        self._refresh_sfen_list()  # 「確認中」表示を一覧の要約に戻す
+        parent = self._dialog_parent()
+        if error is not None:
+            messagebox.showerror("エラー", f"取り込みの準備に失敗しました: {error}",
+                                 parent=parent)
+            return
+        if mixed and not messagebox.askyesno(
+                "確認",
+                "このDBには実対局の前例が入っています。.sfen連続対局は専用DBに"
+                "分けることを推奨します。\nそれでも取り込みますか？",
+                parent=parent):
+            return
+        new_paths = [p for p in paths if scans.get(p) is not None]
+        auto = False   # 「残りも確認せずに取り込む」が選ばれた
+        for p in paths:
+            scan = scans.get(p)
+            if scan is None:
+                self._enqueue_sfen_ingest(p, None, None)  # 追記は尋ねず自動
+                continue
+            new_paths.remove(p)
+            if isinstance(scan, Exception):
+                self._ulog(f"[.sfen] {Path(p).name}: 読み込めません ({scan})")
+                continue
+            if auto:
+                if scan.games:
+                    self._enqueue_sfen_ingest(p, "", None)
+                else:
+                    self._ulog(f"[.sfen] {Path(p).name}: 取り込める対局がない"
+                               "ためスキップ")
+                continue
+            params = self._sfen_preview_dialog(p, scan, remaining=len(new_paths))
+            if params is None:
+                continue
+            label, date_str, auto = params
+            self._enqueue_sfen_ingest(p, label, date_str)
+
+    def _sfen_preview_dialog(self, path: str, scan, remaining: int = 0):
+        """新規バッチの取り込み前プレビュー。
+
+        戻り値: (label, date, 残りも確認せず取り込むか) または None (スキップ)。"""
+        parent = self._dialog_parent()
+        dialog = tk.Toplevel(parent)
         dialog.title("バッチの取り込み")
-        dialog.transient(self._dialog_parent())
-        dialog.grab_set()
+        dialog.transient(parent)
         frame = ttk.Frame(dialog, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
+        wrap = self._px(440)
         rows = [("ファイル", Path(path).name),
                 ("局数", f"{scan.games}局"
-                         + (f" (警告 {len(scan.skipped)}行)" if scan.skipped else "")),
+                         + (f" (読めない行 {len(scan.skipped)})" if scan.skipped else "")),
                 ("課題局面", f"{scan.prefix_len}手目" if scan.prefix_len
-                             else "検出なし (1局のみ等)")]
+                             else "検出なし (1局のみ・初期局面が異なる等)")]
         for i, (k, v) in enumerate(rows):
-            ttk.Label(frame, text=f"{k}:").grid(row=i, column=0, sticky=tk.W)
-            ttk.Label(frame, text=v).grid(row=i, column=1, sticky=tk.W, padx=6)
-        ttk.Label(frame, text="日付:").grid(row=3, column=0, sticky=tk.W)
+            ttk.Label(frame, text=f"{k}:").grid(row=i, column=0, sticky=tk.NW)
+            ttk.Label(frame, text=v, wraplength=wrap).grid(
+                row=i, column=1, sticky=tk.W, padx=6)
+        row = len(rows)
+        notes = []
+        if scan.skipped:
+            notes.append("読めない行はスキップされます。例:\n"
+                         + "\n".join(scan.skipped[:3]))
+        if scan.pending_tail:
+            notes.append("最終行が書きかけのため、今回は取り込まず次回に回します。")
+        if not scan.games:
+            notes.append("取り込める対局がありません。1行に1局、"
+                         "「startpos moves 7g7f ... resign」または"
+                         "「sfen <局面> moves ... resign」の形式が必要です "
+                         "(終局は resign / rep_draw / max_moves)。")
+        if notes:
+            ttk.Label(frame, text="\n\n".join(notes), wraplength=wrap,
+                      justify=tk.LEFT,
+                      foreground="#b35900" if scan.games else "#c62828").grid(
+                row=row, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+            row += 1
+        ttk.Label(frame, text="日付:").grid(row=row, column=0, sticky=tk.W,
+                                           pady=(8, 0))
         date_var = tk.StringVar(value=scan.date_str)
-        ttk.Entry(frame, textvariable=date_var, width=24).grid(
-            row=3, column=1, sticky=tk.W, padx=6)
-        ttk.Label(frame, text="ラベル:").grid(row=4, column=0, sticky=tk.W)
+        date_entry = ttk.Entry(frame, textvariable=date_var, width=24)
+        date_entry.grid(row=row, column=1, sticky=tk.W, padx=6, pady=(8, 0))
+        ttk.Label(frame, foreground="gray",
+                  text="例 2026-10-20 または 2026-10-20 13:00 (空欄なら日付なし)"
+                  ).grid(row=row + 1, column=1, sticky=tk.W, padx=6)
+        ttk.Label(frame, text="ラベル:").grid(row=row + 2, column=0, sticky=tk.W,
+                                            pady=(4, 0))
         label_var = tk.StringVar()
         entry = ttk.Entry(frame, textvariable=label_var, width=32)
-        entry.grid(row=4, column=1, sticky=tk.W, padx=6)
+        entry.grid(row=row + 2, column=1, sticky=tk.W, padx=6, pady=(4, 0))
         ttk.Label(frame, foreground="gray",
                   text="エンジン名・深さ等 (対局者名として表示。空ならファイル名)"
-                  ).grid(row=5, column=1, sticky=tk.W, padx=6)
+                  ).grid(row=row + 3, column=1, sticky=tk.W, padx=6)
+        error_var = tk.StringVar()
+        ttk.Label(frame, textvariable=error_var, foreground="#c62828").grid(
+            row=row + 4, column=0, columnspan=2, sticky=tk.W)
+        rest_var = tk.BooleanVar(value=False)
+        if remaining:
+            ttk.Checkbutton(
+                frame, variable=rest_var,
+                text=f"残り{remaining}ファイルは確認せずに取り込む "
+                     "(ラベル・日付はファイル名から)").grid(
+                row=row + 5, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
         result: dict = {}
         btns = ttk.Frame(frame)
-        btns.grid(row=6, column=0, columnspan=2, pady=(10, 0))
+        btns.grid(row=row + 6, column=0, columnspan=2, pady=(10, 0))
 
-        def accept():
-            result["ok"] = True
+        def accept(_event=None):
+            if not scan.games:
+                return
+            date_str = normalize_date_input(date_var.get())
+            if date_str is None:
+                error_var.set("日付の形式が正しくありません (例 2026-10-20 13:00)")
+                date_entry.focus_set()
+                return
+            result["value"] = (label_var.get().strip(), date_str, rest_var.get())
             dialog.destroy()
 
-        ttk.Button(btns, text="取り込む", command=accept).pack(
-            side=tk.LEFT, padx=4)
+        ok_button = ttk.Button(btns, text="取り込む", command=accept,
+                               state=tk.NORMAL if scan.games else tk.DISABLED)
+        ok_button.pack(side=tk.LEFT, padx=4)
         ttk.Button(btns, text="スキップ", command=dialog.destroy).pack(
             side=tk.LEFT, padx=4)
+        dialog.bind("<Return>", accept)
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
         entry.focus_set()
+
+        def grab():
+            try:
+                dialog.grab_set()
+            except tk.TclError:  # 表示前の grab は失敗する環境がある
+                pass
+
+        dialog.after(50, grab)
         dialog.wait_window()
-        if not result.get("ok"):
-            return None
-        return label_var.get().strip(), date_var.get().strip()
+        return result.get("value")
 
     def _enqueue_sfen_ingest(self, path: str, label, date_str) -> None:
+        """1ファイルの取り込みを投入する。date_str=None はファイル名から。"""
         db = self._sfen_db()
+        name = Path(path).name
 
         def job():
-            ingest_file(db, path, label=label or "",
-                        date_str=date_str if date_str else None,
-                        log_line=lambda m: self._ulog(f"[.sfen] {m}"))
+            self._set_job_progress(f"({name})")
+            result = ingest_file(
+                db, path, label=label or "", date_str=date_str,
+                log_line=lambda m: self._ulog(f"[.sfen] {m}"),
+                progress=lambda i, n: self._set_job_progress(
+                    f"({name} {i}/{n}局)"))
             self.root.after(0, self._refresh_sfen_list)
+            changed = bool(result.added or result.rebuilt)
+            self._after_db_update(db, changed=changed)
+            if changed and not self._sfen_view_hint_shown and \
+                    norm_db_path(self.db_var.get()) != norm_db_path(db):
+                self._sfen_view_hint_shown = True
+                self._ulog("[.sfen] 取り込んだ対局はメイン画面の「.sfen」ボタンで"
+                           "表示を切り替えると検索できます")
 
         self._db_jobs.put((".sfen取り込み", job))
+        self._set_update_status()
 
     def _refresh_sfen_batches_ingest(self) -> None:
         """登録済みバッチを再走査し、追記分を取り込む (1ジョブに集約)。
@@ -1338,35 +1618,44 @@ class PrecedentViewer:
         1ヶ月以上前の日付のバッチは対象外 (連続対局が今も伸びていることはまず
         無く、大量のファイル読みを避ける)。古いバッチを更新したいときは
         「.sfenファイルを追加...」で同じファイルを選べば日付に関係なく処理
-        される。変更なしは無言、特記事項と最後の要約だけログに出す。"""
+        される。変更なしは無言、特記事項と最後の要約だけログに出す。
+        対象の洗い出し (バッチ一覧の集計) もジョブ側で行い、画面を止めない。"""
         if getattr(self, "_sfen_refresh_queued", False):
             self._ulog("[.sfen] 更新チェックは既に実行待ちです")
             return
         db = self._sfen_db()
         if not Path(db).is_file():
-            return
-        cutoff = (datetime.now() - timedelta(days=31)).strftime("%Y-%m-%d")
-        targets, old, missing = [], 0, 0
-        for b in list_batches(db):
-            if b["date"] and b["date"] < cutoff:
-                old += 1
-            elif not Path(b["path"]).is_file():
-                missing += 1
-            else:
-                targets.append(b["path"])
-        if not targets:
-            self._ulog(f"[.sfen] 更新チェック対象なし"
-                       f" (1ヶ月超 {old}件 / ファイル欠落 {missing}件)")
+            self._ulog("[.sfen] .sfen DBがまだありません。"
+                       "先に「.sfenファイルを追加...」で取り込んでください")
             return
         self._sfen_refresh_queued = True
 
         def job():
             added = conflicts = unchanged = 0
+            rebuilt = False
             try:
-                for p in targets:
-                    r = ingest_file(db, p)
+                cutoff = (datetime.now() - timedelta(days=31)).strftime("%Y-%m-%d")
+                targets, old, missing = [], 0, 0
+                for b in list_batches(db):
+                    if b["date"] and b["date"] < cutoff:
+                        old += 1
+                    elif not Path(b["path"]).is_file():
+                        missing += 1
+                    else:
+                        targets.append(b["path"])
+                if not targets:
+                    self._ulog(f"[.sfen] 更新チェック対象なし"
+                               f" (1ヶ月超 {old}件 / ファイル欠落 {missing}件)")
+                    return
+                for i, p in enumerate(targets, 1):
+                    stem = Path(p).stem
+                    self._set_job_progress(f"({i}/{len(targets)} {stem})")
+                    r = ingest_file(db, p, progress=lambda d, n, i=i, stem=stem:
+                                    self._set_job_progress(
+                                        f"({i}/{len(targets)} {stem} {d}/{n}局)"))
                     if r.conflict or r.rebuilt or r.added:
-                        self._ulog(f"[.sfen] {Path(p).stem}: {r.summary()}")
+                        self._ulog(f"[.sfen] {stem}: {r.summary()}")
+                    rebuilt = rebuilt or r.rebuilt
                     if r.conflict:
                         conflicts += 1
                     elif r.unchanged:
@@ -1378,35 +1667,47 @@ class PrecedentViewer:
                 self._ulog(f"[.sfen] 更新チェック完了: 確認 {len(targets)}件 / "
                            f"追加 {added}局 / 競合 {conflicts}件 / "
                            f"変更なし {unchanged}件{extra}")
+                self._after_db_update(db, changed=bool(added or rebuilt))
             finally:
                 self._sfen_refresh_queued = False
                 self.root.after(0, self._refresh_sfen_list)
 
         self._db_jobs.put((".sfen更新チェック", job))
+        self._set_update_status()
 
     def _delete_selected_batch(self) -> None:
         tree = getattr(self, "_sfen_tree", None)
         if tree is None:
             return
-        selection = tree.selection()
+        selection = list(tree.selection())
         if not selection:
+            messagebox.showinfo("バッチ削除", "削除するバッチを一覧で選択してください。",
+                                parent=self._dialog_parent())
             return
-        path = selection[0]
-        stem = Path(path).stem
+        stems = [Path(p).stem for p in selection]
+        names = "\n".join(f"・{s}" for s in stems[:10])
+        if len(stems) > 10:
+            names += f"\n…ほか{len(stems) - 10}件"
         db = self._sfen_db()
         if not messagebox.askyesno(
-                "確認", f"バッチ「{stem}」を専用DBから完全に削除します。\n"
+                "確認", f"次の{len(stems)}バッチを .sfen DBから完全に削除します。\n"
+                        f"{names}\n\n"
                         "よろしいですか？ (.sfenファイル自体は消えません)",
                 parent=self._dialog_parent()):
             return
 
         def job():
-            deleted = delete_batch(db, path,
-                                   log_line=lambda m: self._ulog(f"[.sfen] {m}"))
-            self.root.after(0, self._refresh_sfen_list)
-            self._ulog(f"[.sfen] {stem}: {deleted}件削除")
+            try:
+                for i, path in enumerate(selection, 1):
+                    self._set_job_progress(f"({i}/{len(selection)} {Path(path).stem})")
+                    delete_batch(db, path,
+                                 log_line=lambda m: self._ulog(f"[.sfen] {m}"))
+            finally:
+                self.root.after(0, self._refresh_sfen_list)
+                self._after_db_update(db)
 
         self._db_jobs.put((".sfenバッチ削除", job))
+        self._set_update_status()
 
     def _enabled_sources(self):
         """有効な出典キーの集合。全てONなら None (絞り込み無しの高速経路)。"""

@@ -25,6 +25,7 @@ from __future__ import annotations
 import array
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import time
@@ -42,6 +43,9 @@ _TERMINALS = {"resign", "rep_draw", "max_moves"}
 # 旧台帳は版番号なし (=1)。再読込時に旧版で飛ばした max_moves や勝敗を再評価する。
 _IMPORT_VERSION = 2
 TASK_SUFFIX = "#課題局面"          # 擬似対局のevent接尾辞 (連番の代わりの共通文言)
+WARNING_DISPLAY_LIMIT = 10         # log_line に流す行単位警告の上限 (残りは件数のみ)
+
+log = logging.getLogger(__name__)
 
 
 def _escape_like(value: str) -> str:
@@ -54,15 +58,26 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _batch_game_condition(stem: str) -> tuple[str, list]:
-    """Match only this batch's generated events, even if a name contains '#'."""
+def _batch_lines_condition(stem: str) -> tuple[str, list]:
+    """Match this batch's per-line games ('<stem>#L<digits>') only.
+
+    接頭辞は event の範囲条件 [<stem>#L, <stem>#M) で表す。バイト順比較なので
+    この範囲は「<stem>#L で始まる文字列」とちょうど一致し、UNIQUE索引の範囲
+    走査になる (substr での比較は索引が効かず、バッチごとに games 全走査に
+    なって、大きな .sfen DB ではバッチ一覧の表示だけで数秒〜数十秒かかった)。
+    """
     prefix = f"{stem}#L"
     return (
-        "source = 'sfen' AND (event = ? OR "
-        "(substr(event, 1, ?) = ? AND length(event) >= ? "
-        "AND substr(event, ?) NOT GLOB '*[^0-9]*'))",
-        [f"{stem}{TASK_SUFFIX}", len(prefix), prefix,
-         len(prefix) + 5, len(prefix) + 1])
+        "event >= ? AND event < ? AND source = 'sfen' "
+        "AND length(event) >= ? AND substr(event, ?) NOT GLOB '*[^0-9]*'",
+        [prefix, f"{stem}#M", len(prefix) + 5, len(prefix) + 1])
+
+
+def _batch_game_condition(stem: str) -> tuple[str, list]:
+    """Match only this batch's generated events, even if a name contains '#'."""
+    lines_sql, lines_params = _batch_lines_condition(stem)
+    return (f"((event = ? AND source = 'sfen') OR ({lines_sql}))",
+            [f"{stem}{TASK_SUFFIX}"] + lines_params)
 
 
 @dataclass
@@ -84,6 +99,7 @@ class SfenScan:
     games: int
     skipped: list[str]             # 行単位の警告
     prefix_len: int                # 共通接頭辞 (課題局面までの手数)
+    pending_tail: bool = False     # 書きかけの最終行を保留した
 
 
 @dataclass
@@ -95,6 +111,7 @@ class SfenIngestResult:
     rebuilt: bool = False          # 取り込み仕様の更新や課題局面の変更で再構築した
     prefix_len: int = 0
     error: str = ""                # 取り込みを拒否した理由 (同名別内容など)
+    pending_tail: bool = False     # 書きかけの最終行を次回に保留した
 
     def summary(self) -> str:
         if self.error:
@@ -111,6 +128,8 @@ class SfenIngestResult:
             parts.append(f"課題局面 {self.prefix_len}手目")
         if self.skipped:
             parts.append(f"警告スキップ {len(self.skipped)}行")
+        if self.pending_tail:
+            parts.append("書きかけの最終行は次回に保留")
         return " / ".join(parts)
 
 
@@ -122,8 +141,19 @@ def date_from_name(path: str | Path) -> str:
     return f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]}:{ts[12:14]}"
 
 
-def _read_lines(path: Path) -> list[bytes]:
-    return path.read_bytes().splitlines()
+def _read_lines(path: Path) -> tuple[list[bytes], bytes | None]:
+    """ファイルを行に分ける。戻り値 (行, 保留した書きかけの最終行 or None)。
+
+    生成中の .sfen を取り込むと、最終行が書きかけ (改行なし・終局トークン
+    なし) のことがある。これを既読に数えると、行が書き上がった時点で既読
+    部分のハッシュが変わり、ただの追記なのに競合扱いになってしまう。改行で
+    終わらず、1局として読めない最終行は既読に含めず次回に回す。"""
+    data = path.read_bytes()
+    lines = data.splitlines()
+    if (lines and not data.endswith((b"\n", b"\r"))
+            and isinstance(_parse_line(lines[-1], len(lines)), str)):
+        return lines[:-1], lines[-1]
+    return lines, None
 
 
 def _lines_hash(lines: list[bytes]) -> str:
@@ -132,9 +162,11 @@ def _lines_hash(lines: list[bytes]) -> str:
 
 def _parse_line(raw: bytes, lineno: int) -> ParsedGame | str:
     """1行を解析する。問題があれば警告文字列を返す (その行はスキップ)。"""
-    text = raw.decode("utf-8", errors="replace").strip()
+    text = raw.decode("utf-8", errors="replace").strip().lstrip("\ufeff")
     if not text:
         return f"{lineno}行目: 空行"
+    if text.startswith("position "):   # USIコマンド形式の行もそのまま受け付ける
+        text = text[9:].lstrip()
     head, sep, tail = text.partition(" moves ")
     if not sep:
         return f"{lineno}行目: 'moves' 区切りがありません"
@@ -227,12 +259,13 @@ def _replay(initial_sfen: str | None, usi_moves: list[str]):
 def scan_file(path: str | Path) -> SfenScan:
     """取り込み前のプレビュー情報を集める (盤面再生なしで軽量)。"""
     path = Path(path)
-    lines = _read_lines(path)
+    lines, tail = _read_lines(path)
     games, skipped = _parse_lines(lines)
     return SfenScan(path=str(path), stem=path.stem,
                     date_str=date_from_name(path),
                     total_lines=len(lines), games=len(games),
-                    skipped=skipped, prefix_len=_common_prefix_len(games))
+                    skipped=skipped, prefix_len=_common_prefix_len(games),
+                    pending_tail=tail is not None)
 
 
 def _detail_row(conn: sqlite3.Connection, path: Path):
@@ -293,12 +326,13 @@ def _find_batch_by_stem(conn: sqlite3.Connection, stem: str):
 
 def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
                 date_str: str | None = None,
-                log_line=None) -> SfenIngestResult:
+                log_line=None, progress=None) -> SfenIngestResult:
     """1ファイル(=1バッチ)を取り込む。既知ファイルは追記分のみ自動追加。
 
     label: 対局者名として保存する自由記述 (エンジン名・深さ等)。空なら
     ファイル名 (stem)。date_str: 'YYYY-MM-DD HH:MM:SS'。None ならファイル名
     から取得 (取れなければ日付なし)。追記時は初回登録時の値を使い続ける。
+    progress(done, total): 盤面再生の進捗 (局数単位、間引いて呼ぶ)。
     """
     path = Path(path)
     result = SfenIngestResult()
@@ -307,7 +341,7 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
         if log_line:
             log_line(msg)
 
-    lines = _read_lines(path)
+    lines, tail = _read_lines(path)
     conn = open_for_write(db_path)
     try:
         status, detail = _detail_row(conn, path)
@@ -337,6 +371,10 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
         if detail is not None:
             # --- 既知バッチ: 追記チェック (既読部分のハッシュを常に検証) ---
             known = detail["lines"]
+            if tail is not None and len(lines) < known:
+                # 保留導入前の台帳は改行なしの不正な最終行も既読に数えている
+                lines.append(tail)
+                tail = None
             if (len(lines) < known
                     or _lines_hash(lines[:known]) != detail["sha256"]):
                 conn.execute(
@@ -349,7 +387,9 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
             upgrade = detail.get("import_version", 1) < _IMPORT_VERSION
             if len(lines) == known and not upgrade:
                 result.unchanged = True
+                result.pending_tail = tail is not None
                 conn.commit()  # ファイル移動時の台帳パス更新も保存する
+                say(f"[{path.stem}] {result.summary()}")
                 return result
             label = detail.get("label") or path.stem
             date_str = detail.get("date", "")
@@ -396,7 +436,10 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
                 _refresh_stats(conn, task_touched)
 
         touched = set()
-        for game in new_games:
+        total = len(new_games)
+        for index, game in enumerate(new_games):
+            if progress and index % 50 == 0:
+                progress(index, total)
             try:
                 moves16, keys16 = _replay(game.initial_sfen, game.usi_moves)
             except (ValueError, KeyError, TypeError) as exc:
@@ -425,8 +468,19 @@ def ingest_file(db_path: str | Path, path: str | Path, label: str = "",
         except sqlite3.OperationalError:
             pass
         result.prefix_len = prefix_len
+        result.pending_tail = tail is not None
+        if progress:
+            progress(total, total)
+        # 警告は全件をファイルログへ、画面のログには先頭だけ出す (形式違いの
+        # ファイルだと全行が警告になり、何万行も流れて肝心の要約が埋もれる)
         for msg in result.skipped:
+            log.info("%s: %s", path.name, msg)
+        for msg in result.skipped[:WARNING_DISPLAY_LIMIT]:
             say(f"[{path.stem}] 警告: {msg}")
+        if len(result.skipped) > WARNING_DISPLAY_LIMIT:
+            say(f"[{path.stem}] 警告: ほか "
+                f"{len(result.skipped) - WARNING_DISPLAY_LIMIT}行 "
+                "(全件は runtime/kiricompass.log)")
         say(f"[{path.stem}] {result.summary()}")
         return result
     finally:
@@ -447,11 +501,10 @@ def list_batches(db_path: str | Path) -> list[dict]:
             if detail.get("type") != "sfen":
                 continue
             stem = Path(path).stem
-            condition, params = _batch_game_condition(stem)
+            condition, params = _batch_lines_condition(stem)
             games = conn.execute(
-                f"SELECT COUNT(*) FROM games WHERE {condition} "
-                "AND event != ?",
-                params + [f"{stem}{TASK_SUFFIX}"]).fetchone()[0]
+                f"SELECT COUNT(*) FROM games WHERE {condition}",
+                params).fetchone()[0]
             out.append({"path": path, "stem": stem, "status": status,
                         "label": detail.get("label", ""),
                         "date": (detail.get("date") or "")[:10],

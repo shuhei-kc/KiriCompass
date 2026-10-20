@@ -200,6 +200,81 @@ class SfenIngestTests(unittest.TestCase):
         self.assertTrue(ingest_file(self.db, moved).unchanged)
         self.assertEqual(list_batches(self.db)[0]["path"], str(moved))
 
+    def test_half_written_last_line_waits_instead_of_causing_conflict(self):
+        first = "startpos moves 7g7f 3c3d resign"
+        self.path.write_bytes((first + "\nstartpos moves 7g7f 8c").encode())
+        scan = scan_file(self.path)
+        self.assertEqual((scan.games, scan.skipped, scan.pending_tail),
+                         (1, [], True))
+        result = ingest_file(self.db, self.path)
+        self.assertEqual((result.added, result.skipped, result.pending_tail),
+                         (1, [], True))
+        # The generator finishes the line: a plain append, not a conflict.
+        self.write(first, "startpos moves 7g7f 8c8d max_moves")
+        result = ingest_file(self.db, self.path)
+        self.assertFalse(result.conflict)
+        self.assertEqual(list_batches(self.db)[0]["games"], 2)
+        self.assertTrue(ingest_file(self.db, self.path).unchanged)
+
+    def test_complete_last_line_without_newline_is_ingested(self):
+        self.path.write_bytes(b"startpos moves 7g7f resign")
+        result = ingest_file(self.db, self.path)
+        self.assertEqual((result.added, result.pending_tail), (1, False))
+
+    def test_legacy_ledger_counting_unterminated_bad_line_stays_unchanged(self):
+        self.path.write_bytes(b"startpos moves 7g7f resign\ngarbage")
+        with patch("kifudb.sfen_ingest._read_lines",
+                   lambda path: (path.read_bytes().splitlines(), None)):
+            self.assertEqual(ingest_file(self.db, self.path).added, 1)
+        result = ingest_file(self.db, self.path)
+        self.assertTrue(result.unchanged)
+        self.assertFalse(result.conflict)
+
+    def test_bom_and_usi_position_prefix_are_accepted(self):
+        self.path.write_bytes("\ufeffstartpos moves 7g7f resign\n"
+                              "position startpos moves 2g2f max_moves\n"
+                              .encode("utf-8"))
+        result = ingest_file(self.db, self.path)
+        self.assertEqual((result.added, result.skipped), (2, []))
+
+    def test_progress_is_reported_and_warnings_are_capped(self):
+        self.write(*(["not a game"] * 30 + ["startpos moves 7g7f resign"]))
+        seen, logged = [], []
+        result = ingest_file(self.db, self.path, log_line=logged.append,
+                             progress=lambda done, total: seen.append((done, total)))
+        self.assertEqual((result.added, len(result.skipped)), (1, 30))
+        self.assertEqual(seen[-1], (1, 1))
+        warnings = [m for m in logged if "警告:" in m]
+        self.assertEqual(len(warnings), 11)  # 10 lines + "ほか 20行"
+        self.assertIn("ほか 20行", warnings[-1])
+
+    def test_unchanged_file_is_reported(self):
+        self.write("startpos moves 7g7f resign")
+        ingest_file(self.db, self.path)
+        logged = []
+        self.assertTrue(ingest_file(self.db, self.path,
+                                    log_line=logged.append).unchanged)
+        self.assertEqual(logged, ["[batch] 変更なし"])
+
+    def test_batch_lookup_uses_event_index(self):
+        from kifudb.sfen_ingest import _batch_game_condition, _batch_lines_condition
+        self.write("startpos moves 7g7f resign")
+        ingest_file(self.db, self.path)
+        for build in (_batch_game_condition, _batch_lines_condition):
+            condition, params = build("batch")
+            plan = " ".join(str(row) for row in self.rows_with(
+                f"EXPLAIN QUERY PLAN SELECT game_id FROM games WHERE {condition}",
+                params))
+            self.assertIn("USING INDEX", plan)
+            self.assertNotIn("SCAN games", plan)
+
+    def rows_with(self, sql: str, params):
+        conn = open_read_only(self.db)
+        try:
+            return conn.execute(sql, params).fetchall()
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
