@@ -313,6 +313,7 @@ class PrecedentViewer:
         self._log_lock = threading.Lock()
         self._log_flush_scheduled = False
         self._sfen_list_token = 0        # バッチ一覧の非同期読み込みの世代
+        self._sfen_list_db: str | None = None  # 一覧を読み込んだ .sfen DB
         self._sfen_preparing = False     # .sfen追加の事前確認 (読み込み) 中
         self._reselect_game_id: int | None = None  # 再表示後に選択し直す前例
         self._sfen_view_hint_shown = False
@@ -1353,6 +1354,7 @@ class PrecedentViewer:
         db = self._sfen_db()
         self._sfen_list_token += 1
         token = self._sfen_list_token
+        self._sfen_list_db = db  # 一覧の操作 (削除) はこのDBに対して行う
         if not Path(db).is_file():
             tree.delete(*tree.get_children())
             self._sfen_list_status.set(
@@ -1471,7 +1473,7 @@ class PrecedentViewer:
         for p in paths:
             scan = scans.get(p)
             if scan is None:
-                self._enqueue_sfen_ingest(p, None, None)  # 追記は尋ねず自動
+                self._enqueue_sfen_ingest(p, None, None, db)  # 追記は尋ねず自動
                 continue
             new_paths.remove(p)
             if isinstance(scan, Exception):
@@ -1479,7 +1481,7 @@ class PrecedentViewer:
                 continue
             if auto:
                 if scan.games:
-                    self._enqueue_sfen_ingest(p, "", None)
+                    self._enqueue_sfen_ingest(p, "", None, db)
                 else:
                     self._ulog(f"[.sfen] {Path(p).name}: 取り込める対局がない"
                                "ためスキップ")
@@ -1488,7 +1490,7 @@ class PrecedentViewer:
             if params is None:
                 continue
             label, date_str, auto = params
-            self._enqueue_sfen_ingest(p, label, date_str)
+            self._enqueue_sfen_ingest(p, label, date_str, db)
 
     def _sfen_preview_dialog(self, path: str, scan, remaining: int = 0):
         """新規バッチの取り込み前プレビュー。
@@ -1588,9 +1590,14 @@ class PrecedentViewer:
         dialog.wait_window()
         return result.get("value")
 
-    def _enqueue_sfen_ingest(self, path: str, label, date_str) -> None:
-        """1ファイルの取り込みを投入する。date_str=None はファイル名から。"""
-        db = self._sfen_db()
+    def _enqueue_sfen_ingest(self, path: str, label, date_str,
+                             db: str | None = None) -> None:
+        """1ファイルの取り込みを投入する。date_str=None はファイル名から。
+
+        db: 混在チェック等を済ませた取り込み先。確認中やダイアログ表示中に
+        「.sfen DB」欄が書き換えられても、確認したDBにだけ書く (欄を読み
+        直すと、未確認の公開前例DB等へ警告なしで混入し得る)。"""
+        db = db or self._sfen_db()
         name = Path(path).name
 
         def job():
@@ -1688,9 +1695,11 @@ class PrecedentViewer:
         names = "\n".join(f"・{s}" for s in stems[:10])
         if len(stems) > 10:
             names += f"\n…ほか{len(stems) - 10}件"
-        db = self._sfen_db()
+        # 一覧を読んだDBから消す (その後に欄だけ書き換わっていても別DBを触らない)
+        db = self._sfen_list_db or self._sfen_db()
         if not messagebox.askyesno(
                 "確認", f"次の{len(stems)}バッチを .sfen DBから完全に削除します。\n"
+                        f"({db})\n"
                         f"{names}\n\n"
                         "よろしいですか？ (.sfenファイル自体は消えません)",
                 parent=self._dialog_parent()):

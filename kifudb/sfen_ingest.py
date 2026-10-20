@@ -40,8 +40,10 @@ RESULT_DRAW, RESULT_BLACK, RESULT_WHITE = 0, 1, 2
 
 _STEM_DATE_RE = re.compile(r"(\d{14})")
 _TERMINALS = {"resign", "rep_draw", "max_moves"}
-# 旧台帳は版番号なし (=1)。再読込時に旧版で飛ばした max_moves や勝敗を再評価する。
-_IMPORT_VERSION = 2
+# 旧台帳は版番号なし (=1)。再読込時に旧版で飛ばした行や勝敗を再評価する。
+# 2 = max_moves・後手番開始の勝敗、3 = BOM・"position ..." 形式の行。
+# 読める行の範囲を広げたら上げる (既存バッチが再構築され、復旧される)。
+_IMPORT_VERSION = 3
 TASK_SUFFIX = "#課題局面"          # 擬似対局のevent接尾辞 (連番の代わりの共通文言)
 WARNING_DISPLAY_LIMIT = 10         # log_line に流す行単位警告の上限 (残りは件数のみ)
 

@@ -237,6 +237,22 @@ class SfenIngestTests(unittest.TestCase):
         result = ingest_file(self.db, self.path)
         self.assertEqual((result.added, result.skipped), (2, []))
 
+    def test_lines_newly_readable_are_recovered_from_older_batches(self):
+        self.path.write_bytes("\ufeffstartpos moves 7g7f resign\n"
+                              "position startpos moves 2g2f max_moves\n"
+                              .encode("utf-8"))
+        # Emulate the v2 parser, which skipped both lines.
+        with patch("kifudb.sfen_ingest._IMPORT_VERSION", 2), \
+                patch("kifudb.sfen_ingest._parse_line",
+                      lambda raw, lineno: f"{lineno}行目: unreadable"):
+            self.assertEqual(ingest_file(self.db, self.path).added, 0)
+        self.assertEqual(scan_file(self.path).games, 2)
+        result = ingest_file(self.db, self.path)
+        self.assertTrue(result.rebuilt)
+        self.assertEqual((result.added, result.skipped), (2, []))
+        self.assertEqual(list_batches(self.db)[0]["games"], 2)
+        self.assertTrue(ingest_file(self.db, self.path).unchanged)
+
     def test_progress_is_reported_and_warnings_are_capped(self):
         self.write(*(["not a game"] * 30 + ["startpos moves 7g7f resign"]))
         seen, logged = [], []
