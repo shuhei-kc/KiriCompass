@@ -1354,9 +1354,9 @@ class PrecedentViewer:
         db = self._sfen_db()
         self._sfen_list_token += 1
         token = self._sfen_list_token
-        self._sfen_list_db = db  # 一覧の操作 (削除) はこのDBに対して行う
         if not Path(db).is_file():
             tree.delete(*tree.get_children())
+            self._sfen_list_db = db
             self._sfen_list_status.set(
                 ".sfen DBはまだありません (最初の取り込みで作成されます)")
             return
@@ -1367,16 +1367,22 @@ class PrecedentViewer:
                 batches, error = list_batches(db), None
             except Exception as exc:  # noqa: BLE001 - 対象DBが前例DB等でも落とさない
                 batches, error = [], str(exc)
-            self.root.after(0, self._show_sfen_list, token, batches, error)
+            self.root.after(0, self._show_sfen_list, token, db, batches, error)
 
         threading.Thread(target=task, daemon=True).start()
 
-    def _show_sfen_list(self, token: int, batches: list, error) -> None:
+    def _show_sfen_list(self, token: int, db: str, batches: list,
+                        error) -> None:
         tree = getattr(self, "_sfen_tree", None)
         if (token != self._sfen_list_token or tree is None
                 or not tree.winfo_exists()):
             return  # より新しい読み込みが走っている / 窓が閉じた
-        selected = tree.selection()
+        # 一覧の操作 (削除) の対象DBは、表示を差し替えるこの時点で切り替える。
+        # 読み込み開始時に切り替えると、読み込み中に残っている旧DBの一覧から
+        # 選んだバッチを、新DB側の同名バッチとして消してしまう。
+        # 別DBの一覧には旧DBでの選択を持ち越さない (iid=パスが偶然一致し得る)
+        selected = tree.selection() if db == self._sfen_list_db else ()
+        self._sfen_list_db = db
         tree.delete(*tree.get_children())
         for b in batches:
             tree.insert("", tk.END, iid=b["path"], values=(
