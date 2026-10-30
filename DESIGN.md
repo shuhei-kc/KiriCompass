@@ -164,7 +164,10 @@ status='unfinished' で台帳にだけ記録し、サイズ/mtime が変わっ�
 全処理は logging でファイルとGUIログ両方に出す。
 
 **増分更新。** 台帳の (size, mtime_ns) が一致するファイルはパースせずスキップ。
-`event` の UNIQUE 制約で別フォルダの同一棋譜も重複排除。私的棋譜
+例外は error の行で、パーサの版 (ingest.py `PARSER_VERSION`) が上がると、
+DBが新しい版を使い始めた時刻 (meta `parser_upgraded_at`) より前に記録された
+error 行だけを1回読み直す (判定が行単位なので、どのフォルダから先に取り
+込んでも漏れない)。`event` の UNIQUE 制約で別フォルダの同一棋譜も重複排除。私的棋譜
 (source=other) は event がファイル名語幹で一意性の保証がないため、指し手
 内容のハッシュ8桁を event に付加する — 同名の別対局は両方登録され、
 同一内容の複製だけが排除される。

@@ -19,6 +19,12 @@ log = logging.getLogger("kifudb.ingest")
 
 KIFU_SUFFIXES = {".csa", ".kif", ".kifu"}
 
+# 棋譜パーサ (csa.py / kif.py) の版。読める棋譜の範囲を広げたら上げる —
+# 旧版で error になった台帳行が、ファイルが変わっていなくても1回だけ
+# 読み直される (.sfen の _IMPORT_VERSION と同じ考え方)。版の記録が無い
+# DB は1扱い。2 = KIFの分岐記号 '+' と「反則負け」のまで行。
+PARSER_VERSION = 2
+
 # 出典判定は「配布できる公開棋譜である」ことの証明として使う (公開/プライベート
 # の振り分け) ため、接頭辞だけでなくサーバー・大会の命名構造まで要求する —
 # 接頭辞一致だけでは私的なファイル名 (例 'dr2_研究メモ.kif') が偶然マッチして
@@ -295,6 +301,8 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
 
     Safe to re-run: unchanged files are skipped via the source_files ledger,
     unfinished/errored files are retried once their size or mtime changes.
+    Errored files are also retried once after a parser upgrade
+    (PARSER_VERSION), even if unchanged.
     `file_filter(path)` を渡すと True のファイルだけを対象にする
     (公開/プライベートの振り分け取り込みに使う)。
     """
@@ -317,8 +325,11 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
     total = len(files)
     log.info("found %d kifu files under %s", total, folder)
 
+    # 現行パーサより前に error になった行は台帳に無いものとして扱い、読み直す
     ledger = {path: (size, mtime_ns) for path, size, mtime_ns in conn.execute(
-        "SELECT path, file_size, file_mtime_ns FROM source_files")}
+        "SELECT path, file_size, file_mtime_ns FROM source_files "
+        "WHERE NOT (status = 'error' AND ingested_at < ?)",
+        (_parser_upgraded_at(conn),))}
 
     touched_keys: set[int] = set()
     started = time.time()
@@ -365,6 +376,31 @@ def ingest_folder(db_path: str | Path, folder: str | Path,
     conn.close()
     log.info("done in %.1fs: %s", time.time() - started, stats.summary())
     return stats
+
+
+def _parser_upgraded_at(conn: sqlite3.Connection) -> str:
+    """このDBが現行の PARSER_VERSION を使い始めた時刻 (台帳と同じUTC表記)。
+
+    これより前に記録された error 行が「旧パーサで読めなかった」行。読み直した
+    行は INSERT OR REPLACE で記録時刻が新しくなるので、二度目は無い。判定が
+    フォルダ単位でなく行単位なので、版が上がった後に別フォルダを先に取り
+    込んでも、残りのフォルダの error 行は次にそのフォルダを取り込むときに
+    漏れなく読み直される。"""
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key='parser_version'").fetchone()
+    try:
+        current = int(row[0]) if row else 1
+    except ValueError:
+        current = 1
+    if current < PARSER_VERSION:
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('parser_version', ?)",
+                     (str(PARSER_VERSION),))
+        conn.execute("INSERT OR REPLACE INTO meta "
+                     "VALUES ('parser_upgraded_at', datetime('now'))")
+        conn.commit()
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key='parser_upgraded_at'").fetchone()
+    return row[0] if row else ""
 
 
 def _ingest_file(conn: sqlite3.Connection, path: Path,

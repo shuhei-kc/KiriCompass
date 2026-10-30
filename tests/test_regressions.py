@@ -214,6 +214,53 @@ class RegressionTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_errors_from_an_older_parser_are_retried_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "test.db"
+            folders = []
+            for name in ("a", "b"):
+                folder = root / name
+                folder.mkdir()
+                (folder / f"{name}.csa").write_text(
+                    f"V2.2\n$EVENT:{name}\nPI\n+\n+7776FU\n%TORYO\n",
+                    encoding="utf-8")
+                folders.append(folder)
+            # 旧パーサ時代の台帳: ファイルは変わっていないが error のまま
+            conn = open_for_write(db_path)
+            try:
+                for folder in folders:
+                    for path in folder.iterdir():
+                        st = path.stat()
+                        conn.execute(
+                            "INSERT INTO source_files (path, file_size, "
+                            "file_mtime_ns, status, detail, ingested_at) "
+                            "VALUES (?,?,?,'error','old parser',"
+                            "'2000-01-01 00:00:00')",
+                            (str(path), st.st_size, st.st_mtime_ns))
+                conn.commit()
+            finally:
+                conn.close()
+
+            # 版が上がった後に別フォルダを先に取り込んでも、b も読み直される
+            for folder in folders:
+                with self.subTest(folder=folder.name):
+                    self.assertEqual(ingest_folder(db_path, folder).added, 1)
+            again = ingest_folder(db_path, folders[0])
+            self.assertEqual((again.added, again.skipped_unchanged), (0, 1))
+
+    def test_errors_from_the_current_parser_are_not_reread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "kifu"
+            folder.mkdir()
+            (folder / "bad.csa").write_text(
+                "V2.2\nPI\n+\n+0055FU\n%TORYO\n", encoding="utf-8")
+            db_path = root / "test.db"
+            self.assertEqual(ingest_folder(db_path, folder).errors, 1)
+            again = ingest_folder(db_path, folder)
+            self.assertEqual((again.errors, again.skipped_unchanged), (0, 1))
+
     def test_sfen_rejects_rank_wider_than_nine_squares(self) -> None:
         with self.assertRaises(ValueError):
             Position().set_sfen("9P/9/9/9/9/9/9/9/9 b -")
