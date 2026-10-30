@@ -5,14 +5,16 @@
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)" || exit 1
 cd "$ROOT" || exit 1
 
-# 3.10以上の python3 を使う (macOS同梱3.9のTk8.5はクリック取りこぼしの
-# 不具合があるため不可)。バージョン確認のサブプロセス起動を毎回全候補に
-# 行うと遅いので、前回の当たりを runtime/gui_python にキャッシュし、
-# 起動時はその1本だけ検証する (無効になっていれば再探索)。
+# 3.10以上で tkinter を持つ python3 を使う (macOS同梱3.9のTk8.5はクリック
+# 取りこぼしの不具合があるため不可。Homebrew の python は python-tk を
+# 入れないと tkinter が無く、選ぶと何も表示されずに終わる)。確認の
+# サブプロセス起動を毎回全候補に行うと遅いので、前回の当たりを
+# runtime/gui_python にキャッシュし、起動時はその1本だけ検証する
+# (無効になっていれば再探索)。
 CACHE="$ROOT/runtime/gui_python"
 usable() {
     [ -n "$1" ] && [ -x "$1" ] && "$1" -c \
-        'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+        'import sys, tkinter; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
         2>/dev/null
 }
 
@@ -32,7 +34,7 @@ if [ -z "$PY" ]; then
         fi
     done
     if [ -z "$PY" ]; then
-        osascript -e 'display alert "KiriCompass" message "Python 3.10以上が見つかりません。python.org または Homebrew からインストールしてください。"' >/dev/null 2>&1
+        osascript -e 'display alert "KiriCompass" message "tkinter付きの Python 3.10以上が見つかりません。python.org 版をインストールしてください (Homebrew の場合は python-tk も必要です)。"' >/dev/null 2>&1
         exit 1
     fi
     mkdir -p "$ROOT/runtime" 2>/dev/null
