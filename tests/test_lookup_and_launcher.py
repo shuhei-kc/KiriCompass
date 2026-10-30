@@ -106,5 +106,34 @@ class LauncherTests(unittest.TestCase):
                     self.assertEqual(result.stderr, "")
 
 
+class EngineInputEncodingTests(unittest.TestCase):
+    def test_setoption_path_is_read_in_the_engine_encoding(self):
+        # PYTHONIOENCODING は「パイプの既定」の代役。日本語Windowsの cp932
+        # 既定でも、--encoding 既定の UTF-8 で送られた日本語パスを読めること。
+        cli = Path(__file__).resolve().parents[1] / "tools" / "usi_engine.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game = root / "game.sfen"
+            game.write_text("startpos moves 7g7f max_moves\n")
+            db = root / "前例 テスト.db"
+            ingest_file(db, game)
+            commands = (f"setoption name DbPath value {db}\n"
+                        "isready\nposition startpos\ngo\nquit\n")
+            for encoding, pipe_default in (("utf-8", "cp932"),
+                                           ("cp932", "utf-8")):
+                with self.subTest(encoding=encoding):
+                    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                               PYTHONIOENCODING=pipe_default)
+                    result = subprocess.run(
+                        [sys.executable, "-B", str(cli), "--db", "unset.db",
+                         "--sync-file", str(root / "sync.json"),
+                         "--encoding", encoding],
+                        env=env, input=commands.encode(encoding),
+                        check=True, capture_output=True, timeout=10)
+                    stdout = result.stdout.decode(encoding)
+                    self.assertNotIn("DB not found", stdout)
+                    self.assertIn("bestmove 7g7f", stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

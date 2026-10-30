@@ -92,6 +92,15 @@ def main() -> None:
     # ShogiGUI・将棋所向け (cp932) は起動フラグで、あるいはGUIの
     # setoption OutputEncoding からも実行中に切り替えられる。
     engine.set_output_encoding(args.encoding)
+    # 入力も同じエンコーディングで読む。GUIは usi 応答の既定値 (DbPath・
+    # SyncFile のフルパス) を setoption でそのまま送り返すが、パイプの既定は
+    # ロケール依存 (日本語Windowsでは cp932) なので、ShogiHome の UTF-8 を
+    # 読むと日本語を含むパスが化けて DB が開けなくなる。読み始めた後は
+    # 切り替えられないため、実行中の OutputEncoding 変更は出力だけに効く。
+    try:
+        sys.stdin.reconfigure(encoding=args.encoding, errors="replace")
+    except (AttributeError, OSError):
+        pass
     engine.run()
 
 
