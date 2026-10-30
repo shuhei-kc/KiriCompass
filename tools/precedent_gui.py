@@ -219,7 +219,30 @@ def save_interval_sidecar(db_path: str, intervals, max_gid: int,
             json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass  # 保存失敗は次回再計算するだけ
-RESULT_JA = {1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
+
+
+def read_config(path: Path) -> dict | None:
+    """GUI設定 (gui_config.json) を読む。無い・読めない場合は None。
+
+    UTF-8 で保存する。旧版は文字コード未指定で書いており、Windows では
+    ANSIコードページ (日本語環境なら cp932) になっていた。UTF-8モード
+    (PYTHONUTF8=1、Python 3.15 以降は既定) で読むと UnicodeDecodeError に
+    なり起動ごと止まるため、UTF-8 で読めなければ mbcs で読み直す。"""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    encodings = ("utf-8", "mbcs") if sys.platform == "win32" else ("utf-8",)
+    for encoding in encodings:
+        try:
+            config = json.loads(raw.decode(encoding))
+        except ValueError:  # UnicodeDecodeError / JSONDecodeError
+            continue
+        return config if isinstance(config, dict) else None
+    return None
+
+
+RESULT_JA ={1: "先手勝", 2: "後手勝", 0: "引分", None: "―"}
 WINNER_JA = {1: "先", 2: "後"}  # それ以外 (引分・結果なし) は "-"
 SFEN_STATUS_JA = {"ok": "OK", "conflict": "競合"}
 
@@ -2068,26 +2091,25 @@ class PrecedentViewer:
     # -- config ----------------------------------------------------------
 
     def _load_config(self) -> None:
-        try:
-            config = json.loads(CONFIG_PATH.read_text())
-            self.db_var.set(config.get("db_path", ""))
-            self.sfen_var.set(config.get("last_sfen", ""))
-            self.startup_check_var.set(
-                bool(config.get("floodgate_startup_check", True)))
-            self.sync_var.set(bool(config.get("sync_follow", True)))
-            # 旧設定からの移行: 対象DB未設定なら当時のビューアDB、それも
-            # 無ければ既定パス (data/csa.db) を使う
-            self.fg_db_var.set(config.get("floodgate_db_path")
-                               or config.get("db_path")
-                               or str(DEFAULT_PUBLIC_DB))
-            if config.get("private_db_path"):
-                self.private_db_var.set(config["private_db_path"])
-            if config.get("sfen_db_path"):
-                self.sfen_db_var.set(config["sfen_db_path"])
-            if config.get("sync_file"):
-                self._sync_file = Path(config["sync_file"])
-        except (OSError, json.JSONDecodeError):
-            pass
+        config = read_config(CONFIG_PATH)
+        if config is None:
+            return
+        self.db_var.set(config.get("db_path", ""))
+        self.sfen_var.set(config.get("last_sfen", ""))
+        self.startup_check_var.set(
+            bool(config.get("floodgate_startup_check", True)))
+        self.sync_var.set(bool(config.get("sync_follow", True)))
+        # 旧設定からの移行: 対象DB未設定なら当時のビューアDB、それも
+        # 無ければ既定パス (data/csa.db) を使う
+        self.fg_db_var.set(config.get("floodgate_db_path")
+                           or config.get("db_path")
+                           or str(DEFAULT_PUBLIC_DB))
+        if config.get("private_db_path"):
+            self.private_db_var.set(config["private_db_path"])
+        if config.get("sfen_db_path"):
+            self.sfen_db_var.set(config["sfen_db_path"])
+        if config.get("sync_file"):
+            self._sync_file = Path(config["sync_file"])
 
     def _save_config(self) -> None:
         try:
@@ -2100,8 +2122,8 @@ class PrecedentViewer:
                 "floodgate_db_path": norm_db_path(self.fg_db_var.get()),
                 "private_db_path": norm_db_path(self.private_db_var.get()),
                 "sfen_db_path": norm_db_path(self.sfen_db_var.get())},
-                ensure_ascii=False))
-        except OSError:
+                ensure_ascii=False), encoding="utf-8")
+        except (OSError, ValueError):  # ValueError: 符号化できない文字
             pass
 
 
