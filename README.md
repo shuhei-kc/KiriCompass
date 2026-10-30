@@ -41,7 +41,8 @@ SFENを貼り付けて (または将棋盤GUIに追従して) 前例を検索す
 
 **起動方法**
 
-- macOS: **KiriCompass.app** をダブルクリック。Python 3.10+ を自動で探して記憶する。
+- macOS: **KiriCompass.app** をダブルクリック。tkinter付きの Python 3.10+ を
+  自動で探して記憶する (Homebrew の python は `brew install python-tk` が必要)。
 - Windows: **KiriCompass.pyw** をダブルクリック。`.pyw` の関連付けが無い等で
   動かない場合は **KiriCompass.bat** (コンソールが一瞬出るが、エラーが読める)。
 - CLI: `python3 tools/precedent_gui.py csa.db`
