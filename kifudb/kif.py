@@ -65,12 +65,14 @@ _TERMINAL_REASONS = {
     "不戦勝": None, "不戦敗": None,  # 対局不成立: 指し手なし=未終局扱いで除外
 }
 
+# 行末の '+' は「この手に変化 (分岐) がある」印 (Kifu for Windows 由来、
+# ShogiHome も同じく付ける)。本譜の指し手としては読み捨てる。
 _MOVE_LINE_RE = re.compile(
-    r"^\s*(\d+)\s+(.+?)(?:\s+\(\s*[0-9:／/ ]+\))?\s*$")
+    r"^\s*(\d+)\s+(.+?)(?:\s+\(\s*[0-9:／/ ]+\))?\s*\+?\s*$")
 _FROM_RE = re.compile(r"\((\d)(\d)\)\s*$")
 _FOOTER_RE = re.compile(
     r"^まで\d+手で(?:(先手|後手|下手|上手)の"
-    r"(反則勝ち|入玉宣言勝ち|入玉勝ち|宣言勝ち|勝ち)"
+    r"(反則勝ち|反則負け|入玉宣言勝ち|入玉勝ち|宣言勝ち|勝ち)"
     r"|(千日手|持将棋|中断|引き分け))")
 
 # Engine-analysis comment styles found in KIF files (see ShogiHome
@@ -437,9 +439,13 @@ def _finalize_kif_result(rec: GameRecord, terminal_word: str | None,
             rec.finished = True
             rec.result = None if neutral == "中断" else RESULT_DRAW
             return
-        winner = RESULT_BLACK if side in ("先手", "下手") else RESULT_WHITE
+        named_black = side in ("先手", "下手")
+        if kind == "反則負け":  # 「先手の反則負け」= 名指しされた側の負け
+            named_black = not named_black
+        winner = RESULT_BLACK if named_black else RESULT_WHITE
         if not reason:
-            reason = {"反則勝ち": "illegal_move", "入玉勝ち": "kachi",
+            reason = {"反則勝ち": "illegal_move", "反則負け": "illegal_move",
+                      "入玉勝ち": "kachi",
                       "入玉宣言勝ち": "kachi",
                       "宣言勝ち": "kachi"}.get(kind, "toryo")
 
