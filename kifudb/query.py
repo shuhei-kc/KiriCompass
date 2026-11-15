@@ -450,7 +450,8 @@ class PrecedentReader:
         `name_query`: 対局者名の検索式。スペース区切り=AND、大文字の OR
         または `|` =OR、`-語`=除外。AND が OR より強く結合する (OR で区切った
         塊ごとに AND を評価)。各語は先手・後手どちらかの名前への部分一致
-        (ASCIIは大文字小文字を無視)。名前は games 側にあるため走査中の結合が
+        (ASCIIは大文字小文字を無視)。`b:語` は先手、`w:語` は後手の名前だけを
+        見る (`-b:語` で除外も可)。名前は games 側にあるため走査中の結合が
         必要になり、レアな名前×前例の多い局面では数秒かかることがある。
         """
         key = position_key_from_sfen(normalize_sfen_main(sfen))
@@ -543,6 +544,10 @@ def _name_query_condition(query: str) -> "tuple[str, list[str]]":
     `|` =OR、`-語`=除外。優先順位は AND > OR (ORで区切った塊ごとにANDを
     評価する)。各語は先手・後手どちらかの名前への部分一致で、LIKE の
     ワイルドカード文字はエスケープする。
+
+    語の頭に `b:` (先手) / `w:` (後手) を付けると、その側の名前だけを見る
+    (大文字の `B:` / `W:` も同じ)。除外と組み合わせるときは `-b:語` の順。
+    `b:` だけで名前が無い語は、ただの文字列 `b:` として扱う。
     """
     def like(term: str) -> str:
         escaped = (term.replace("\\", "\\\\")
@@ -562,6 +567,8 @@ def _name_query_condition(query: str) -> "tuple[str, list[str]]":
 
     pair = ("(g.black_name LIKE ? ESCAPE '\\' "
             "OR g.white_name LIKE ? ESCAPE '\\')")
+    side_sql = {"b": "(g.black_name LIKE ? ESCAPE '\\')",
+                "w": "(g.white_name LIKE ? ESCAPE '\\')"}
     group_sqls: list[str] = []
     params: list[str] = []
     for group in groups:
@@ -570,8 +577,14 @@ def _name_query_condition(query: str) -> "tuple[str, list[str]]":
             negate = term.startswith("-") and len(term) > 1
             if negate:
                 term = term[1:]
-            parts.append(("NOT " if negate else "") + pair)
-            params += [like(term), like(term)]
+            side = term[0].lower() if len(term) > 2 and term[1] == ":" else ""
+            if side in side_sql:
+                term = term[2:]
+                parts.append(("NOT " if negate else "") + side_sql[side])
+                params.append(like(term))
+            else:
+                parts.append(("NOT " if negate else "") + pair)
+                params += [like(term), like(term)]
         group_sqls.append("(" + " AND ".join(parts) + ")")
     return "AND (" + " OR ".join(group_sqls) + ") ", params
 
