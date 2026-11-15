@@ -271,6 +271,20 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(pos.sfen_key_string(),
                          "lnsgkgsnl/1r5b1/ppppppppp/9/9/9/PPPPPPPPP/1B5R1/LNSGKGSNL b -")
 
+    def test_denryusen_dr7_main_event_uses_its_own_folder(self) -> None:
+        # 第7回本戦は接頭辞 dr7prd のまま、フォルダだけ dr7_prd
+        # (dr7_production は 404)。第6回までは drN_production のまま。
+        event = ("dr7prd+buoy_blackbid420_dr7prdb1-9-bottom_4_yorkie_gokaku"
+                 "-600-2F+yorkie+gokaku+20261115180044")
+        self.assertEqual(detect_source(event), "denryusen")
+        self.assertEqual(
+            game_url("denryusen", event, ply=40),
+            f"https://denryu-sen.jp/denryusen/dr7_prd/dist/#/{event}/40")
+        old = "dr6prd+x_a_b-600-2F+a+b+20251206100000"
+        self.assertEqual(
+            game_url("denryusen", old),
+            f"https://denryu-sen.jp/denryusen/dr6_production/dist/#/{old}")
+
 
 if __name__ == "__main__":
     unittest.main()

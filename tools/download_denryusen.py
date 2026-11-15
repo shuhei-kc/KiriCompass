@@ -43,6 +43,7 @@ TOURNAMENTS = [
     "dr5_production", "dr5_tsec", "dr5_hardware3",
     "dr6_production", "dr6_tsec",
     "dr7_tsec7",     # TSEC7 (2026-07開催。フォルダ名が drN_tsec 規則から外れる)
+    "dr7_prd",       # 第7回本戦 (2026-11開催。フォルダ名が drN_production でない)
 ]
 
 # 終局済みCSAの目印: %トークン行 (%TORYO等) か summary行。どちらも無い
