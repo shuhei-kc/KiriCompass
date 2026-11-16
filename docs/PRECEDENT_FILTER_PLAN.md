@@ -15,10 +15,12 @@ KiriCanvas から「先手が Frieren の対局だけ」のように前例を絞
 - `kifudb/query.py` の `_name_query_condition` に `b:` / `w:` (大文字も可、除外は `-b:語`) を足した。
   `precedents_page(name_query=...)` と前例ビューア (`tools/precedent_gui.py`) はそのまま使える。テストは `tests/test_name_query.py`。
 - API (`backend/server.py` の `/api/precedents`) に `q` を足し、2026-11-10 に API 用の PC へ反映した。下の「API の仕様」のとおりに動いている。
+- KiriCanvas も `q` を送っている (2026-11-10。`kiricanvas/src/platform/precedents.ts`)。返ってきた `q` が送ったものと
+  違えば応答を捨て、続きは `nextCursor` で取る。これで、この方針で決めた範囲は済んだ。
 
 ## API の仕様 (`/api/precedents?q=`)
 
-KiriCanvas 側はこれに合わせて作る。
+KiriCanvas 側はこれに合わせて作ってある。直すときの拠り所にする。
 
 - `q` は省略できる。省略 (または空白だけ) なら、応答は `q` を足す前と同じ。
 - `q` を付けたときの違い:
@@ -37,10 +39,6 @@ KiriCanvas 側はこれに合わせて作る。
   `/api/health` の `nameQuery` (`core` / `builtin`) に出る。**記法を変えるときは、サーバ内の写しも一緒に直す。**
 - 実測 (API 用の PC、初期局面 = 前例 約 110 万局): 当たりの無い名前で全部を読んで約 1.4 秒。
   このため本番では 2 秒の区切りはまだ起きておらず、区切りの動きは手元の試験でしか確かめていない。
-
-## 次にやること
-
-- KiriCanvas 側で `q` を送る (KiriCompass_Lab の `kiricanvas/docs/PROPOSALS.md` の C)。
 
 ## まだ決めていないこと (後で)
 
